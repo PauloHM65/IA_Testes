@@ -1,0 +1,13 @@
+services:
+  redis:
+    image: redis/redis-stack:latest
+    container_name: redis-rag
+    ports:
+      - "63790:6379"
+      - "63791:8001"  # RedisInsight (UI)
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+volumes:
+  redis_data:
