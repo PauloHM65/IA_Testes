@@ -1,8 +1,7 @@
-"""Módulo de logging: registra cada etapa do pipeline RAG em arquivos."""
+"""Módulo de logging: registra cada etapa do pipeline DRAG em arquivos."""
 
 from __future__ import annotations
 
-import os
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -49,7 +48,7 @@ def log_cabecalho():
     agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     _logger._write(
         "╔════════════════════════════════════════════════════════════╗\n"
-        "║          DRAG Qwen 2.5 + LangChain + Redis              ║\n"
+        "║          DRAG + LangChain + Redis                        ║\n"
         f"║           Sessão: {agora}                    ║\n"
         "╚════════════════════════════════════════════════════════════╝\n\n"
     )
@@ -118,12 +117,12 @@ def log_indexacao_redis(num_chunks: int, redis_url: str):
 def log_chain_montada():
     _logger._next_step("CHAIN DRAG — Pipeline montado:")
     _logger._write(
-        "             Pergunta → MultiQuery (LLM gera N variações)\n"
+        "             Pergunta → MultiQuery (LLM gera variações)\n"
         "                → Retriever (top-k por variação)\n"
-        "                → Rerank (cross-encoder)\n"
         "                → Vizinhos (±N chunks adjacentes)\n"
+        "                → Rerank (cross-encoder sobre vizinhos expandidos)\n"
         "                → format_docs → Prompt (system + human)\n"
-        "                → LLM → StrOutputParser → Resposta\n\n"
+        "                → LLM → StrOutputParser → latex_to_unicode → Resposta\n\n"
     )
 
 
@@ -149,38 +148,40 @@ def log_separador_conversas():
 
 # ==================== SEÇÃO 2: INTERAÇÕES ====================
 
-def log_interacao(numero: int, pergunta: str, chunks: list, contexto: str, resposta: str,
-                   generated_queries: list = None, raw_count: int = 0, rerank_count: int = 0):
-    # Lazy load: lê RERANK_TOP_N no momento da chamada (após load_dotenv)
-    rerank_top_n = int(os.getenv("RERANK_TOP_N", "5"))
-
+def log_interacao(
+    numero: int,
+    pergunta: str,
+    chunks: list,
+    contexto: str,
+    resposta: str,
+    generated_queries: list[str],
+    raw_count: int,
+    rerank_count: int,
+):
+    """Registra uma interação completa. Recebe todos os dados prontos — sem ler config."""
     _logger._write(
         f"┌──────────────────────────────────────────────────────────┐\n"
         f"│  INTERAÇÃO #{numero:<3}                          {_logger._timestamp()}  │\n"
         f"└──────────────────────────────────────────────────────────┘\n\n"
     )
 
-    # Passo 1 — Input
+    # Entrada
     _logger._write(f"  [ENTRADA] Pergunta do usuário:\n")
     _logger._write(f"    \"{pergunta}\"\n\n")
 
-    # Passo 2 — MultiQuery
-    _logger._write(f"  [MULTIQUERY] Queries geradas pelo LLM:\n")
+    # MultiQuery
+    total_queries = len(generated_queries) + 1
+    _logger._write(f"  [MULTIQUERY] {total_queries} queries ({len(generated_queries)} geradas + original):\n")
     _logger._write(f"    1. \"{pergunta}\" (original)\n")
-    if generated_queries:
-        for i, q in enumerate(generated_queries, start=2):
-            _logger._write(f"    {i}. \"{q}\"\n")
-    _logger._write(f"\n")
+    for i, q in enumerate(generated_queries, start=2):
+        _logger._write(f"    {i}. \"{q}\"\n")
+    _logger._write("\n")
 
-    # Passo 3 — Embedding
-    _logger._write(f"  [EMBEDDING] Cada query convertida em vetor numérico\n")
-    _logger._write(f"    Para busca por similaridade no Redis.\n\n")
+    # Retriever
+    _logger._write(f"  [RETRIEVER] {raw_count} chunks recuperados (deduplicados das {total_queries} queries)\n\n")
 
-    # Passo 4 — Retriever + Rerank + Vizinhos
-    total_queries = len(generated_queries or []) + 1
-    _logger._write(f"  [RETRIEVER] {raw_count} chunks recuperados (após deduplicação das {total_queries} queries)\n\n")
-    _logger._write(f"  [RERANK] {rerank_count} chunks mantidos (top {rerank_top_n} × {total_queries} queries = {rerank_top_n * total_queries})\n\n")
-    _logger._write(f"  [VIZINHOS] {len(chunks)} chunks no contexto final (±2 adjacentes por chunk):\n\n")
+    # Vizinhos + Rerank
+    _logger._write(f"  [VIZINHOS → RERANK] Expandidos → rerankeados: {rerank_count} chunks finais:\n\n")
     for i, chunk in enumerate(chunks):
         source = chunk.metadata.get("source", "?")
         page = chunk.metadata.get("page", "?")
@@ -191,20 +192,18 @@ def log_interacao(numero: int, pergunta: str, chunks: list, contexto: str, respo
         _logger._write(f"    │ Preview: \"{preview}...\"\n")
         _logger._write(f"    └─────────────────────────────────────────────────────\n\n")
 
-    # Passo 4 — Contexto formatado
-    _logger._write(f"  [FORMAT_DOCS] Contexto montado ({len(contexto)} caracteres):\n")
-    _logger._write(f"    Cada chunk recebe tag [Fonte: ...] e são separados por ---\n\n")
+    # Contexto
+    _logger._write(f"  [FORMAT_DOCS] Contexto montado ({len(contexto)} caracteres)\n\n")
 
-    # Passo 5 — Prompt
+    # Prompt
     _logger._write(f"  [PROMPT] Mensagem enviada ao LLM:\n")
     _logger._write(f"    SYSTEM: instruções + contexto ({len(contexto)} chars)\n")
     _logger._write(f"    HUMAN: \"{pergunta}\"\n\n")
 
-    # Passo 6 — LLM
+    # LLM
     _logger._write(f"  [LLM] Resposta do modelo (via Ollama):\n")
     _logger._write(f"    \"{resposta}\"\n\n")
 
-    # Separador entre interações
     _logger._write("  " + "─" * 56 + "\n\n")
 
 

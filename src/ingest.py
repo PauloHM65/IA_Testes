@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 from pathlib import Path
 
+import redis as redis_lib
 from langchain_community.document_loaders import (
     DirectoryLoader,
     TextLoader,
@@ -16,40 +16,36 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_redis import RedisVectorStore
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from src.config import cfg
+
+
+class E5Embeddings(HuggingFaceEmbeddings):
+    """Wrapper que adiciona os prefixos 'query: ' / 'passage: ' exigidos por modelos E5."""
+
+    def embed_query(self, text: str) -> list[float]:
+        return super().embed_query(f"query: {text}")
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return super().embed_documents([f"passage: {t}" for t in texts])
+
 
 _embeddings_cache: HuggingFaceEmbeddings | None = None
 
 
-def get_embeddings(model_name: str | None = None) -> HuggingFaceEmbeddings:
+def get_embeddings() -> HuggingFaceEmbeddings:
     global _embeddings_cache
     if _embeddings_cache is not None:
         return _embeddings_cache
 
     from src.logger import log_embeddings_carregado
 
-    model_name = model_name or os.getenv(
-        "EMBEDDING_MODEL", "intfloat/multilingual-e5-small"
-    )
+    model_name = cfg.EMBEDDING_MODEL
+    cls = E5Embeddings if "e5" in model_name.lower() else HuggingFaceEmbeddings
 
-    _embeddings_cache = HuggingFaceEmbeddings(
+    _embeddings_cache = cls(
         model_name=model_name,
         model_kwargs={"device": "cpu"},
     )
-
-    # Modelos E5 precisam de prefixo "query: " / "passage: " para funcionar bem.
-    # Pydantic não permite sobrescrever métodos, então usamos object.__setattr__.
-    if "e5" in model_name.lower():
-        _original_embed_query = _embeddings_cache.embed_query
-        _original_embed_documents = _embeddings_cache.embed_documents
-
-        def _e5_embed_query(text: str) -> list[float]:
-            return _original_embed_query(f"query: {text}")
-
-        def _e5_embed_documents(texts: list[str]) -> list[list[float]]:
-            return _original_embed_documents([f"passage: {t}" for t in texts])
-
-        object.__setattr__(_embeddings_cache, "embed_query", _e5_embed_query)
-        object.__setattr__(_embeddings_cache, "embed_documents", _e5_embed_documents)
 
     log_embeddings_carregado(model_name)
     return _embeddings_cache
@@ -70,7 +66,6 @@ def load_documents(docs_dir: str = "fontes") -> list:
         silent_errors=True
     )
     pdf_docs = pdf_loader.load()
-    # Verifica PDFs vazios/corrompidos
     for doc in pdf_docs:
         if doc.page_content.strip():
             documents.append(doc)
@@ -100,21 +95,18 @@ def load_documents(docs_dir: str = "fontes") -> list:
 
 def split_documents(documents: list) -> list:
     """Divide documentos em chunks menores e atribui chunk_index por fonte."""
-    chunk_size = int(os.getenv("CHUNK_SIZE", "1000"))
-    chunk_overlap = int(os.getenv("CHUNK_OVERLAP", "200"))
-
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
+        chunk_size=cfg.CHUNK_SIZE,
+        chunk_overlap=cfg.CHUNK_OVERLAP,
     )
     chunks = splitter.split_documents(documents)
 
-    # Normaliza espaços em branco: colapsa tabs/espaços múltiplos e linhas vazias
+    # Normaliza espaços em branco
     for chunk in chunks:
         text = chunk.page_content
-        text = re.sub(r"[^\S\n]+", " ", text)       # tabs e espaços múltiplos -> 1 espaço
-        text = re.sub(r" *\n *", "\n", text)         # espaços ao redor de quebras de linha
-        text = re.sub(r"\n{3,}", "\n\n", text)       # 3+ quebras de linha -> 2
+        text = re.sub(r"[^\S\n]+", " ", text)
+        text = re.sub(r" *\n *", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
         chunk.page_content = text.strip()
 
     # Atribui chunk_index sequencial por fonte (para busca de vizinhos)
@@ -126,68 +118,63 @@ def split_documents(documents: list) -> list:
         source_counters[source] = idx + 1
 
     from src.logger import log_chunks_gerados
-    log_chunks_gerados(chunks, chunk_size, chunk_overlap)
+    log_chunks_gerados(chunks, cfg.CHUNK_SIZE, cfg.CHUNK_OVERLAP)
 
     return chunks
 
 
 def _compute_docs_hash(docs_dir: str) -> str:
-    """Calcula hash MD5 combinado de todos os arquivos do diretório de documentos."""
+    """Calcula hash SHA-256 dos arquivos incluindo amostra do conteúdo."""
     docs_path = Path(docs_dir)
-    hasher = hashlib.md5()
+    hasher = hashlib.sha256()
     for filepath in sorted(docs_path.rglob("*")):
         if filepath.is_file() and filepath.suffix.lower() in (".pdf", ".txt"):
             hasher.update(filepath.name.encode())
             hasher.update(str(filepath.stat().st_size).encode())
-            hasher.update(str(filepath.stat().st_mtime_ns).encode())
+            # Lê primeiros 8KB do conteúdo para detectar alterações reais
+            with open(filepath, "rb") as f:
+                hasher.update(f.read(8192))
     return hasher.hexdigest()
 
 
-def _get_stored_hash(redis_url: str) -> str | None:
+def _get_stored_hash() -> str | None:
     """Recupera o hash da última ingestão armazenado no Redis."""
-    import redis
     try:
-        client = redis.from_url(redis_url)
+        client = redis_lib.from_url(cfg.REDIS_URL)
         stored = client.get("rag_docs_hash")
         return stored.decode("utf-8") if stored else None
     except Exception:
         return None
 
 
-def _store_hash(redis_url: str, docs_hash: str):
+def _store_hash(docs_hash: str):
     """Armazena o hash da ingestão atual no Redis."""
-    import redis
-    client = redis.from_url(redis_url)
+    client = redis_lib.from_url(cfg.REDIS_URL)
     client.set("rag_docs_hash", docs_hash)
 
 
-def _drop_existing_index(redis_url: str, index_name: str):
+def _drop_existing_index(index_name: str):
     """Remove índice e documentos antigos do Redis para evitar duplicatas."""
-    import redis
     try:
-        client = redis.from_url(redis_url)
+        client = redis_lib.from_url(cfg.REDIS_URL)
         client.ft(index_name).dropindex(delete_documents=True)
     except Exception:
-        pass  # índice não existe ainda
+        pass
 
 
 def index_documents(chunks: list, embeddings: HuggingFaceEmbeddings) -> RedisVectorStore:
     """Indexa os chunks no Redis como banco vetorial + hash para vizinhos."""
-    import redis as redis_lib
-
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
-
-    _drop_existing_index(redis_url, "rag_docs")
+    _drop_existing_index("rag_docs")
 
     vectorstore = RedisVectorStore.from_documents(
         documents=chunks,
         embedding=embeddings,
-        redis_url=redis_url,
+        redis_url=cfg.REDIS_URL,
         index_name="rag_docs",
     )
 
-    # Salva chunks num hash Redis para busca de vizinhos: chave = "chunk:{source}:{index}"
-    client = redis_lib.from_url(redis_url)
+    # Salva chunks num hash Redis para busca de vizinhos
+    client = redis_lib.from_url(cfg.REDIS_URL)
     client.delete("rag_chunks_map")
     for chunk in chunks:
         source = chunk.metadata.get("source", "desconhecido")
@@ -196,30 +183,27 @@ def index_documents(chunks: list, embeddings: HuggingFaceEmbeddings) -> RedisVec
         client.hset("rag_chunks_map", key, chunk.page_content)
 
     from src.logger import log_indexacao_redis
-    log_indexacao_redis(len(chunks), redis_url)
+    log_indexacao_redis(len(chunks), cfg.REDIS_URL)
 
     return vectorstore
 
 
 def run_ingest(docs_dir: str = "fontes", force: bool = False) -> RedisVectorStore | None:
     """Pipeline completo de ingestão. Pula se os documentos não mudaram."""
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
-
     # Validação de conexão Redis
-    import redis
     try:
-        client = redis.from_url(redis_url)
+        client = redis_lib.from_url(cfg.REDIS_URL)
         client.ping()
-    except redis.exceptions.ConnectionError:
+    except redis_lib.exceptions.ConnectionError:
         raise ConnectionError(
-            f"Não foi possível conectar ao Redis em '{redis_url}'. "
+            f"Não foi possível conectar ao Redis em '{cfg.REDIS_URL}'. "
             f"Verifique se o container está rodando: docker compose up -d"
         )
 
-    # Ingestão incremental: verifica se docs mudaram
+    # Ingestão incremental
     if not force:
         current_hash = _compute_docs_hash(docs_dir)
-        stored_hash = _get_stored_hash(redis_url)
+        stored_hash = _get_stored_hash()
         if current_hash == stored_hash:
             from src.logger import log_alerta
             log_alerta("Documentos não mudaram desde a última ingestão. Pulando.")
@@ -230,9 +214,7 @@ def run_ingest(docs_dir: str = "fontes", force: bool = False) -> RedisVectorStor
     chunks = split_documents(documents)
     vectorstore = index_documents(chunks, embeddings)
 
-    # Salva hash para próxima verificação
-    current_hash = _compute_docs_hash(docs_dir)
-    _store_hash(redis_url, current_hash)
+    _store_hash(_compute_docs_hash(docs_dir))
 
     return vectorstore
 

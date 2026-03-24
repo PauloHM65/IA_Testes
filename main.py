@@ -1,4 +1,4 @@
-"""Ponto de entrada: CLI interativo para o DRAG com Qwen 2.5 + Redis."""
+"""Ponto de entrada: CLI interativo para o DRAG com LangChain + Redis."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ load_dotenv()
 
 
 def cmd_ingest(args):
-    import os
+    from src.config import cfg
     from src.ingest import run_ingest
     from src.logger import (
         log_cabecalho, log_inicio_inicializacao, log_redis_pronto,
@@ -37,16 +37,7 @@ def cmd_ingest(args):
     log_cabecalho()
     log_inicio_inicializacao()
     log_redis_pronto()
-    log_dotenv_carregado({
-        "REDIS_URL": os.getenv("REDIS_URL", ""),
-        "OLLAMA_BASE_URL": os.getenv("OLLAMA_BASE_URL", ""),
-        "LLM_MODEL": os.getenv("LLM_MODEL", ""),
-        "EMBEDDING_MODEL": os.getenv("EMBEDDING_MODEL", ""),
-        "RERANK_MODEL": os.getenv("RERANK_MODEL", ""),
-        "RERANK_TOP_N": os.getenv("RERANK_TOP_N", ""),
-        "CHUNK_SIZE": os.getenv("CHUNK_SIZE", ""),
-        "CHUNK_OVERLAP": os.getenv("CHUNK_OVERLAP", ""),
-    })
+    log_dotenv_carregado(cfg.as_dict())
 
     stop = threading.Event()
     t = threading.Thread(target=lambda: _ingest_spinner(stop), daemon=True)
@@ -81,16 +72,6 @@ def spinner_loop(stop_event, status=None):
     print("\r" + " " * 60 + "\r", end="", flush=True)
 
 
-def invoke_with_spinner(chain, pergunta):
-    stop = threading.Event()
-    t = threading.Thread(target=spinner_loop, args=(stop,), daemon=True)
-    t.start()
-    resposta = chain.invoke(pergunta)
-    stop.set()
-    t.join()
-    return resposta
-
-
 def cmd_ask(args):
     from src.rag_chain import ask
 
@@ -99,13 +80,13 @@ def cmd_ask(args):
 
 
 def cmd_chat(_args):
-    from src.rag_chain import build_drag_components, invoke_with_log
+    from src.rag_chain import DragPipeline
     from src.logger import (
         log_chain_montada, log_pronto,
         log_separador_conversas, log_interacao, log_encerramento,
     )
 
-    retriever, answer_chain = build_drag_components()
+    pipeline = DragPipeline()
     log_chain_montada()
     log_pronto()
     log_separador_conversas()
@@ -133,17 +114,26 @@ def cmd_chat(_args):
         stop = threading.Event()
         t = threading.Thread(target=spinner_loop, args=(stop, status), daemon=True)
         t.start()
-        resposta, chunks, contexto, generated_queries, raw_count, rerank_count = invoke_with_log(retriever, answer_chain, pergunta, status=status)
+        result = pipeline.invoke(pergunta, status=status)
         stop.set()
         t.join()
 
-        log_interacao(interacao_num, pergunta, chunks, contexto, resposta, generated_queries, raw_count, rerank_count)
-        print(f"{LARANJA}IA: {resposta}{RESET}\n")
+        log_interacao(
+            interacao_num,
+            pergunta,
+            result.chunks,
+            result.contexto,
+            result.resposta,
+            result.generated_queries,
+            result.raw_count,
+            result.rerank_count,
+        )
+        print(f"{LARANJA}IA: {result.resposta}{RESET}\n")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="DRAG com Qwen 2.5 + LangChain + Redis"
+        description="DRAG com LangChain + Redis"
     )
     subparsers = parser.add_subparsers(dest="command")
 
@@ -158,12 +148,12 @@ def main():
     ingest_parser.set_defaults(func=cmd_ingest)
 
     # Comando: ask
-    ask_parser = subparsers.add_parser("ask", help="Fazer uma pergunta ao RAG")
-    ask_parser.add_argument("question", help="Pergunta para o RAG")
+    ask_parser = subparsers.add_parser("ask", help="Fazer uma pergunta ao DRAG")
+    ask_parser.add_argument("question", help="Pergunta para o DRAG")
     ask_parser.set_defaults(func=cmd_ask)
 
     # Comando: chat
-    chat_parser = subparsers.add_parser("chat", help="Chat interativo com o RAG")
+    chat_parser = subparsers.add_parser("chat", help="Chat interativo com o DRAG")
     chat_parser.set_defaults(func=cmd_chat)
 
     args = parser.parse_args()
