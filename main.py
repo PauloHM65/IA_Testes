@@ -1,5 +1,7 @@
 """Ponto de entrada: CLI interativo para o DRAG com Qwen 2.5 + Redis."""
 
+from __future__ import annotations
+
 import argparse
 import logging
 import sys
@@ -49,10 +51,13 @@ def cmd_ingest(args):
     stop = threading.Event()
     t = threading.Thread(target=lambda: _ingest_spinner(stop), daemon=True)
     t.start()
-    run_ingest(args.docs_dir)
+    result = run_ingest(args.docs_dir, force=args.force)
     stop.set()
     t.join()
-    print(f"\r{LARANJA}Ingestão concluída com sucesso!{RESET}          ")
+    if result is None:
+        print(f"\r{LARANJA}Documentos não mudaram. Ingestão pulada.{RESET}          ")
+    else:
+        print(f"\r{LARANJA}Ingestão concluída com sucesso!{RESET}          ")
 
 
 def _ingest_spinner(stop_event):
@@ -66,13 +71,14 @@ def _ingest_spinner(stop_event):
         time.sleep(0.1)
 
 
-def spinner_loop(stop_event):
+def spinner_loop(stop_event, status=None):
     i = 0
     while not stop_event.is_set():
-        print(f"\r{LARANJA}{SPINNER_FRAMES[i % len(SPINNER_FRAMES)]} Pensando...{RESET}", end="", flush=True)
+        msg = status[0] if status else "Pensando..."
+        print(f"\r{LARANJA}{SPINNER_FRAMES[i % len(SPINNER_FRAMES)]} {msg}{RESET}          ", end="", flush=True)
         i += 1
         time.sleep(0.1)
-    print("\r" + " " * 20 + "\r", end="", flush=True)
+    print("\r" + " " * 60 + "\r", end="", flush=True)
 
 
 def invoke_with_spinner(chain, pergunta):
@@ -123,14 +129,15 @@ def cmd_chat(_args):
 
         interacao_num += 1
 
+        status = ["Pensando..."]
         stop = threading.Event()
-        t = threading.Thread(target=spinner_loop, args=(stop,), daemon=True)
+        t = threading.Thread(target=spinner_loop, args=(stop, status), daemon=True)
         t.start()
-        resposta, chunks, contexto = invoke_with_log(retriever, answer_chain, pergunta)
+        resposta, chunks, contexto, generated_queries, raw_count, rerank_count = invoke_with_log(retriever, answer_chain, pergunta, status=status)
         stop.set()
         t.join()
 
-        log_interacao(interacao_num, pergunta, chunks, contexto, resposta)
+        log_interacao(interacao_num, pergunta, chunks, contexto, resposta, generated_queries, raw_count, rerank_count)
         print(f"{LARANJA}IA: {resposta}{RESET}\n")
 
 
@@ -144,6 +151,9 @@ def main():
     ingest_parser = subparsers.add_parser("ingest", help="Indexar documentos no Redis")
     ingest_parser.add_argument(
         "--docs-dir", default="fontes", help="Diretório com os documentos (default: fontes)"
+    )
+    ingest_parser.add_argument(
+        "--force", action="store_true", help="Forçar reingestão mesmo sem mudanças nos documentos"
     )
     ingest_parser.set_defaults(func=cmd_ingest)
 

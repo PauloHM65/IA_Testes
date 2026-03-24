@@ -29,7 +29,7 @@ printf "\r${LARANJA}✓ Redis pronto.${RESET}              \n"
 # Venv
 source .venv/bin/activate
 
-# Ingestão + Chat
+# Ingestão (incremental: pula se docs não mudaram)
 echo ""
 python main.py ingest
 echo ""
