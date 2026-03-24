@@ -1,44 +1,53 @@
 """Módulo de logging: registra cada etapa do pipeline RAG em arquivos."""
 
+from __future__ import annotations
+
+import os
+import threading
 from datetime import datetime
 from pathlib import Path
 
 LOGS_DIR = Path(__file__).parent.parent / "logs"
 LOGS_DIR.mkdir(exist_ok=True)
 
-_session_file = None
-_step_counter = 0
+
+class SessionLogger:
+    """Logger de sessão thread-safe, sem estado global mutável."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._session_file: Path | None = None
+        self._step_counter = 0
+
+    def _get_session_file(self) -> Path:
+        if self._session_file is None:
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            self._session_file = LOGS_DIR / f"sessao_{timestamp}.log"
+        return self._session_file
+
+    def _write(self, text: str):
+        filepath = self._get_session_file()
+        with self._lock:
+            with open(filepath, "a", encoding="utf-8") as f:
+                f.write(text)
+
+    def _timestamp(self) -> str:
+        return datetime.now().strftime("%H:%M:%S")
+
+    def _next_step(self, descricao: str):
+        self._step_counter += 1
+        self._write(f"  [{self._timestamp()}] PASSO {self._step_counter} — {descricao}\n")
 
 
-def _get_session_file() -> Path:
-    global _session_file
-    if _session_file is None:
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        _session_file = LOGS_DIR / f"sessao_{timestamp}.log"
-    return _session_file
-
-
-def _write(text: str):
-    filepath = _get_session_file()
-    with open(filepath, "a", encoding="utf-8") as f:
-        f.write(text)
-
-
-def _timestamp() -> str:
-    return datetime.now().strftime("%H:%M:%S")
-
-
-def _next_step(descricao: str):
-    global _step_counter
-    _step_counter += 1
-    _write(f"  [{_timestamp()}] PASSO {_step_counter} — {descricao}\n")
+# Instância singleton usada pelas funções de módulo
+_logger = SessionLogger()
 
 
 # ==================== SEÇÃO 1: INICIALIZAÇÃO ====================
 
 def log_cabecalho():
     agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    _write(
+    _logger._write(
         "╔════════════════════════════════════════════════════════════╗\n"
         "║          DRAG Qwen 2.5 + LangChain + Redis              ║\n"
         f"║           Sessão: {agora}                    ║\n"
@@ -47,7 +56,7 @@ def log_cabecalho():
 
 
 def log_inicio_inicializacao():
-    _write(
+    _logger._write(
         "┌────────────────────────────────────────────────────────────┐\n"
         "│              FASE 1: INICIALIZAÇÃO DO SISTEMA              │\n"
         "└────────────────────────────────────────────────────────────┘\n\n"
@@ -55,75 +64,82 @@ def log_inicio_inicializacao():
 
 
 def log_redis_pronto():
-    _next_step("REDIS STACK — Container Docker iniciado, porta 6379 disponível.")
+    _logger._next_step("REDIS STACK — Container Docker iniciado, porta 6379 disponível.")
 
 
 def log_dotenv_carregado(variaveis: dict):
-    _next_step("DOTENV — Variáveis de ambiente carregadas:")
+    _logger._next_step("DOTENV — Variáveis de ambiente carregadas:")
     for k, v in variaveis.items():
-        _write(f"             {k} = {v}\n")
-    _write("\n")
+        _logger._write(f"             {k} = {v}\n")
+    _logger._write("\n")
 
 
 def log_documentos_carregados(num_docs: int, fontes: list):
-    _next_step(f"LOADER — {num_docs} documento(s) carregado(s) de:")
+    _logger._next_step(f"LOADER — {num_docs} documento(s) carregado(s) de:")
     for fonte in fontes:
-        _write(f"             - {fonte}\n")
-    _write("\n")
+        _logger._write(f"             - {fonte}\n")
+    _logger._write("\n")
 
 
 def log_chunks_gerados(chunks: list, chunk_size: int, chunk_overlap: int):
     num_chunks = len(chunks)
-    _next_step(
+    _logger._next_step(
         f"SPLITTER — {num_chunks} chunk(s) gerados "
         f"(tamanho={chunk_size}, overlap={chunk_overlap})"
     )
-    _write("\n")
+    _logger._write("\n")
     for i, chunk in enumerate(chunks):
         source = chunk.metadata.get("source", "?")
         page = chunk.metadata.get("page", "?")
         tamanho = len(chunk.page_content)
         preview = chunk.page_content[:150].replace("\n", " ")
-        _write(f"    ┌─ Chunk {i+1}/{num_chunks} ──────────────────────────────────\n")
-        _write(f"    │ Fonte: {source}\n")
-        _write(f"    │ Página: {page}\n")
-        _write(f"    │ Tamanho: {tamanho} chars\n")
-        _write(f"    │ Conteúdo: \"{preview}...\"\n")
-        _write(f"    └──────────────────────────────────────────────────\n\n")
-    _write("\n")
+        _logger._write(f"    ┌─ Chunk {i+1}/{num_chunks} ──────────────────────────────────\n")
+        _logger._write(f"    │ Fonte: {source}\n")
+        _logger._write(f"    │ Página: {page}\n")
+        _logger._write(f"    │ Tamanho: {tamanho} chars\n")
+        _logger._write(f"    │ Conteúdo: \"{preview}...\"\n")
+        _logger._write(f"    └──────────────────────────────────────────────────\n\n")
+    _logger._write("\n")
 
 
 def log_embeddings_carregado(model_name: str):
-    _next_step(f"EMBEDDINGS — Modelo carregado: {model_name}")
-    _write("             Converte texto → vetor de 768 dimensões (CPU)\n\n")
+    _logger._next_step(f"EMBEDDINGS — Modelo carregado: {model_name}")
+    _logger._write("             Converte texto → vetor numérico (CPU)\n\n")
 
 
 def log_indexacao_redis(num_chunks: int, redis_url: str):
-    _next_step(
+    _logger._next_step(
         f"INDEXAÇÃO — {num_chunks} chunks vetorizados e salvos no Redis "
         f"({redis_url}, índice: rag_docs)"
     )
-    _write("\n")
+    _logger._write("\n")
 
 
 def log_chain_montada():
-    _next_step("CHAIN DRAG — Pipeline montado:")
-    _write(
-        "             Pergunta → Retriever (top-20) → Rerank (top-5)\n"
+    _logger._next_step("CHAIN DRAG — Pipeline montado:")
+    _logger._write(
+        "             Pergunta → MultiQuery (LLM gera N variações)\n"
+        "                → Retriever (top-k por variação)\n"
+        "                → Rerank (cross-encoder)\n"
+        "                → Vizinhos (±N chunks adjacentes)\n"
         "                → format_docs → Prompt (system + human)\n"
         "                → LLM → StrOutputParser → Resposta\n\n"
     )
 
 
 def log_pronto():
-    _next_step("SISTEMA PRONTO — Aguardando perguntas do usuário.")
-    _write("\n")
+    _logger._next_step("SISTEMA PRONTO — Aguardando perguntas do usuário.")
+    _logger._write("\n")
+
+
+def log_alerta(mensagem: str):
+    _logger._write(f"  [{_logger._timestamp()}] ALERTA — {mensagem}\n\n")
 
 
 # ==================== SEPARADOR ====================
 
 def log_separador_conversas():
-    _write(
+    _logger._write(
         "\n"
         "╔════════════════════════════════════════════════════════════╗\n"
         "║                 FASE 2: CONVERSAS (CHAT)                  ║\n"
@@ -133,55 +149,70 @@ def log_separador_conversas():
 
 # ==================== SEÇÃO 2: INTERAÇÕES ====================
 
-def log_interacao(numero: int, pergunta: str, chunks: list, contexto: str, resposta: str):
-    _write(
+def log_interacao(numero: int, pergunta: str, chunks: list, contexto: str, resposta: str,
+                   generated_queries: list = None, raw_count: int = 0, rerank_count: int = 0):
+    # Lazy load: lê RERANK_TOP_N no momento da chamada (após load_dotenv)
+    rerank_top_n = int(os.getenv("RERANK_TOP_N", "5"))
+
+    _logger._write(
         f"┌──────────────────────────────────────────────────────────┐\n"
-        f"│  INTERAÇÃO #{numero:<3}                          {_timestamp()}  │\n"
+        f"│  INTERAÇÃO #{numero:<3}                          {_logger._timestamp()}  │\n"
         f"└──────────────────────────────────────────────────────────┘\n\n"
     )
 
     # Passo 1 — Input
-    _write(f"  [ENTRADA] Pergunta do usuário:\n")
-    _write(f"    \"{pergunta}\"\n\n")
+    _logger._write(f"  [ENTRADA] Pergunta do usuário:\n")
+    _logger._write(f"    \"{pergunta}\"\n\n")
 
-    # Passo 2 — Embedding da pergunta
-    _write(f"  [EMBEDDING] Pergunta convertida em vetor de 768 dimensões\n")
-    _write(f"    Para busca por similaridade no Redis.\n\n")
+    # Passo 2 — MultiQuery
+    _logger._write(f"  [MULTIQUERY] Queries geradas pelo LLM:\n")
+    _logger._write(f"    1. \"{pergunta}\" (original)\n")
+    if generated_queries:
+        for i, q in enumerate(generated_queries, start=2):
+            _logger._write(f"    {i}. \"{q}\"\n")
+    _logger._write(f"\n")
 
-    # Passo 3 — Retriever + Rerank
-    _write(f"  [RETRIEVER → RERANK] 20 chunks buscados, {len(chunks)} mantidos após reranking:\n\n")
+    # Passo 3 — Embedding
+    _logger._write(f"  [EMBEDDING] Cada query convertida em vetor numérico\n")
+    _logger._write(f"    Para busca por similaridade no Redis.\n\n")
+
+    # Passo 4 — Retriever + Rerank + Vizinhos
+    total_queries = len(generated_queries or []) + 1
+    _logger._write(f"  [RETRIEVER] {raw_count} chunks recuperados (após deduplicação das {total_queries} queries)\n\n")
+    _logger._write(f"  [RERANK] {rerank_count} chunks mantidos (top {rerank_top_n} × {total_queries} queries = {rerank_top_n * total_queries})\n\n")
+    _logger._write(f"  [VIZINHOS] {len(chunks)} chunks no contexto final (±2 adjacentes por chunk):\n\n")
     for i, chunk in enumerate(chunks):
         source = chunk.metadata.get("source", "?")
         page = chunk.metadata.get("page", "?")
         preview = chunk.page_content[:200].replace("\n", " ")
-        _write(f"    ┌─ Chunk {i+1} ─────────────────────────────────────────\n")
-        _write(f"    │ Fonte: {source}\n")
-        _write(f"    │ Página: {page}\n")
-        _write(f"    │ Preview: \"{preview}...\"\n")
-        _write(f"    └─────────────────────────────────────────────────────\n\n")
+        _logger._write(f"    ┌─ Chunk {i+1} ─────────────────────────────────────────\n")
+        _logger._write(f"    │ Fonte: {source}\n")
+        _logger._write(f"    │ Página: {page}\n")
+        _logger._write(f"    │ Preview: \"{preview}...\"\n")
+        _logger._write(f"    └─────────────────────────────────────────────────────\n\n")
 
     # Passo 4 — Contexto formatado
-    _write(f"  [FORMAT_DOCS] Contexto montado ({len(contexto)} caracteres):\n")
-    _write(f"    Cada chunk recebe tag [Fonte: ...] e são separados por ---\n\n")
+    _logger._write(f"  [FORMAT_DOCS] Contexto montado ({len(contexto)} caracteres):\n")
+    _logger._write(f"    Cada chunk recebe tag [Fonte: ...] e são separados por ---\n\n")
 
     # Passo 5 — Prompt
-    _write(f"  [PROMPT] Mensagem enviada ao LLM:\n")
-    _write(f"    SYSTEM: instruções + contexto ({len(contexto)} chars)\n")
-    _write(f"    HUMAN: \"{pergunta}\"\n\n")
+    _logger._write(f"  [PROMPT] Mensagem enviada ao LLM:\n")
+    _logger._write(f"    SYSTEM: instruções + contexto ({len(contexto)} chars)\n")
+    _logger._write(f"    HUMAN: \"{pergunta}\"\n\n")
 
     # Passo 6 — LLM
-    _write(f"  [LLM] Resposta do modelo (via Ollama):\n")
-    _write(f"    \"{resposta}\"\n\n")
+    _logger._write(f"  [LLM] Resposta do modelo (via Ollama):\n")
+    _logger._write(f"    \"{resposta}\"\n\n")
 
     # Separador entre interações
-    _write("  " + "─" * 56 + "\n\n")
+    _logger._write("  " + "─" * 56 + "\n\n")
 
 
 def log_encerramento(motivo: str):
-    _write(
+    _logger._write(
         f"\n"
         f"╔════════════════════════════════════════════════════════════╗\n"
-        f"║  SESSÃO ENCERRADA — {_timestamp()}                             ║\n"
+        f"║  SESSÃO ENCERRADA — {_logger._timestamp()}                             ║\n"
         f"║  Motivo: {motivo:<49}║\n"
         f"╚════════════════════════════════════════════════════════════╝\n"
     )
