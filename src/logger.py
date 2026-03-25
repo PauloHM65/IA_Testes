@@ -44,12 +44,18 @@ _logger = SessionLogger()
 
 # ==================== SEÇÃO 1: INICIALIZAÇÃO ====================
 
-def log_cabecalho():
+def log_cabecalho(service_display_name: str = ""):
     agora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     _logger._write(
         "╔════════════════════════════════════════════════════════════╗\n"
-        "║          DRAG + LangChain + Redis                        ║\n"
-        f"║           Sessão: {agora}                    ║\n"
+        "║          DRAG Multi-Serviço + LangChain + Redis           ║\n"
+        f"║  Sessão: {agora}                               ║\n"
+    )
+    if service_display_name:
+        _logger._write(
+            f"║  Serviço: {service_display_name:<48}║\n"
+        )
+    _logger._write(
         "╚════════════════════════════════════════════════════════════╝\n\n"
     )
 
@@ -63,11 +69,11 @@ def log_inicio_inicializacao():
 
 
 def log_redis_pronto():
-    _logger._next_step("REDIS STACK — Container Docker iniciado, porta 6379 disponível.")
+    _logger._next_step("REDIS STACK — Container Docker iniciado.")
 
 
-def log_dotenv_carregado(variaveis: dict):
-    _logger._next_step("DOTENV — Variáveis de ambiente carregadas:")
+def log_config_carregado(variaveis: dict):
+    _logger._next_step("CONFIG — Configuração do serviço carregada:")
     for k, v in variaveis.items():
         _logger._write(f"             {k} = {v}\n")
     _logger._write("\n")
@@ -106,24 +112,20 @@ def log_embeddings_carregado(model_name: str):
     _logger._write("             Converte texto → vetor numérico (CPU)\n\n")
 
 
-def log_indexacao_redis(num_chunks: int, redis_url: str):
+def log_indexacao_redis(num_chunks: int, redis_url: str, index_name: str = ""):
+    extra = f", índice: {index_name}" if index_name else ""
     _logger._next_step(
         f"INDEXAÇÃO — {num_chunks} chunks vetorizados e salvos no Redis "
-        f"({redis_url}, índice: rag_docs)"
+        f"({redis_url}{extra})"
     )
     _logger._write("\n")
 
 
-def log_chain_montada():
-    _logger._next_step("CHAIN DRAG — Pipeline montado:")
-    _logger._write(
-        "             Pergunta → MultiQuery (LLM gera variações)\n"
-        "                → Retriever (top-k por variação)\n"
-        "                → Vizinhos (±N chunks adjacentes)\n"
-        "                → Rerank (cross-encoder sobre vizinhos expandidos)\n"
-        "                → format_docs → Prompt (system + human)\n"
-        "                → LLM → StrOutputParser → latex_to_unicode → Resposta\n\n"
-    )
+def log_chain_montada(pipeline_steps: list[str]):
+    _logger._next_step("PIPELINE — Etapas configuradas:")
+    for i, step in enumerate(pipeline_steps, 1):
+        _logger._write(f"             {i}. {step}\n")
+    _logger._write("\n")
 
 
 def log_pronto():
@@ -158,7 +160,7 @@ def log_interacao(
     raw_count: int,
     rerank_count: int,
 ):
-    """Registra uma interação completa. Recebe todos os dados prontos — sem ler config."""
+    """Registra uma interação completa. Recebe todos os dados prontos."""
     _logger._write(
         f"┌──────────────────────────────────────────────────────────┐\n"
         f"│  INTERAÇÃO #{numero:<3}                          {_logger._timestamp()}  │\n"
@@ -170,18 +172,19 @@ def log_interacao(
     _logger._write(f"    \"{pergunta}\"\n\n")
 
     # MultiQuery
-    total_queries = len(generated_queries) + 1
-    _logger._write(f"  [MULTIQUERY] {total_queries} queries ({len(generated_queries)} geradas + original):\n")
-    _logger._write(f"    1. \"{pergunta}\" (original)\n")
-    for i, q in enumerate(generated_queries, start=2):
-        _logger._write(f"    {i}. \"{q}\"\n")
-    _logger._write("\n")
+    if generated_queries:
+        total_queries = len(generated_queries) + 1
+        _logger._write(f"  [MULTIQUERY] {total_queries} queries ({len(generated_queries)} geradas + original):\n")
+        _logger._write(f"    1. \"{pergunta}\" (original)\n")
+        for i, q in enumerate(generated_queries, start=2):
+            _logger._write(f"    {i}. \"{q}\"\n")
+        _logger._write("\n")
 
     # Retriever
-    _logger._write(f"  [RETRIEVER] {raw_count} chunks recuperados (deduplicados das {total_queries} queries)\n\n")
+    _logger._write(f"  [RETRIEVER] {raw_count} chunks recuperados\n\n")
 
-    # Vizinhos + Rerank
-    _logger._write(f"  [VIZINHOS → RERANK] Expandidos → rerankeados: {rerank_count} chunks finais:\n\n")
+    # Chunks finais
+    _logger._write(f"  [RESULTADO] {rerank_count} chunks finais:\n\n")
     for i, chunk in enumerate(chunks):
         source = chunk.metadata.get("source", "?")
         page = chunk.metadata.get("page", "?")

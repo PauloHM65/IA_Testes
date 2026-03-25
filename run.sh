@@ -14,7 +14,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo -e "${AZUL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-echo -e "${AZUL}  DRAG + LangChain + Redis${RESET} + LLM"
+echo -e "${AZUL}  DRAG Multi-Serviço + LangChain + Redis${RESET}"
 echo -e "${AZUL}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 echo ""
 
@@ -29,8 +29,14 @@ printf "\r${LARANJA}✓ Redis pronto.${RESET}              \n"
 # Venv
 source .venv/bin/activate
 
+# Serviço (opcional: passar como argumento, ex: ./run.sh juridico)
+SERVICE_FLAG=""
+if [ -n "$1" ]; then
+    SERVICE_FLAG="--service $1"
+fi
+
 # Ingestão (incremental: pula se docs não mudaram)
 echo ""
-python main.py ingest
+python main.py $SERVICE_FLAG ingest
 echo ""
-python main.py chat
+python main.py $SERVICE_FLAG chat

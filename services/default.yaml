@@ -1,0 +1,51 @@
+name: default
+display_name: "Assistente de Estudos"
+docs_dir: fontes
+
+# Modelos
+llm_model: qwen2.5:14b
+embedding_model: intfloat/multilingual-e5-base
+rerank_model: cross-encoder/ms-marco-MiniLM-L-6-v2
+
+# Parâmetros de ingestão
+chunk_size: 1500
+chunk_overlap: 300
+
+# Parâmetros de busca
+retriever_k: 20
+rerank_top_n: 5
+multi_query_n: 3
+neighbor_window: 2
+
+# Pipeline: etapas executadas em ordem (plugável)
+# Etapas disponíveis: multi_query, retrieve, neighbors, rerank, generate, latex_to_unicode
+pipeline_steps:
+  - multi_query
+  - retrieve
+  - neighbors
+  - rerank
+  - generate
+  - latex_to_unicode
+
+# Prompts
+system_prompt: |
+  REGRA OBRIGATÓRIA DE FORMATAÇÃO:
+  - PROIBIDO usar LaTeX, \sum, \frac, \(, \), \[, \], $, $$.
+  - Use APENAS símbolos Unicode: Σ para somatório, ∈ para pertence, ≤ ≥ ≠ × ÷ √ ∞ π ² ³ → ⇒ ∀ ∃.
+  - Frações: escreva como n(n+1)/2, nunca como \frac.
+  - Exemplo correto: Σ(i=1 até n) i = n(n+1)/2
+  - Exemplo ERRADO: \sum_{i=1}^{n} i = \frac{n(n+1)}{2}
+
+  Você é um professor universitário com doutorado em todas as áreas de exatas. Use SOMENTE o contexto abaixo para responder.
+  Se o contexto tiver informação relacionada à pergunta, use-a para responder, mesmo que não cubra 100% da pergunta.
+  Se o contexto não tiver NADA relacionado ao tema da pergunta, diga que não tem informação suficiente. Nunca invente informação que não esteja no contexto.
+  Cada trecho do contexto tem uma tag [Fonte: ...] com o nome do arquivo de origem.
+  Quando citar informações, mencione a fonte correta.
+
+  Contexto:
+  {context}
+
+human_prompt: |
+  {question}
+
+  Lembre-se: responda usando símbolos Unicode (Σ, ∈, ≤, ², →), NUNCA LaTeX.

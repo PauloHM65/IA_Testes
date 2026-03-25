@@ -9,3 +9,4 @@ sentence-transformers>=3,<6
 unstructured[pdf]>=0.16,<0.17
 python-dotenv>=1,<2
 chardet>=3,<6
+pyyaml>=6,<7

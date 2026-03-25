@@ -1,4 +1,4 @@
-"""Ponto de entrada: CLI interativo para o DRAG com LangChain + Redis."""
+"""Ponto de entrada: CLI interativo para o DRAG Multi-Serviço."""
 
 from __future__ import annotations
 
@@ -26,23 +26,34 @@ SPINNER_FRAMES = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]
 load_dotenv()
 
 
+def _load_service_config(service_name: str | None):
+    """Carrega a config do serviço (pelo nome ou auto-detecta)."""
+    from src.config import ServiceConfig, get_default_service
+
+    name = service_name or get_default_service()
+    return ServiceConfig.load(name)
+
+
 def cmd_ingest(args):
-    from src.config import cfg
     from src.ingest import run_ingest
     from src.logger import (
         log_cabecalho, log_inicio_inicializacao, log_redis_pronto,
-        log_dotenv_carregado,
+        log_config_carregado,
     )
 
-    log_cabecalho()
+    config = _load_service_config(args.service)
+
+    log_cabecalho(config.display_name)
     log_inicio_inicializacao()
     log_redis_pronto()
-    log_dotenv_carregado(cfg.as_dict())
+    log_config_carregado(config.as_dict())
+
+    print(f"{LARANJA}Serviço: {config.display_name}{RESET}")
 
     stop = threading.Event()
     t = threading.Thread(target=lambda: _ingest_spinner(stop), daemon=True)
     t.start()
-    result = run_ingest(args.docs_dir, force=args.force)
+    result = run_ingest(config, force=args.force)
     stop.set()
     t.join()
     if result is None:
@@ -73,24 +84,27 @@ def spinner_loop(stop_event, status=None):
 
 
 def cmd_ask(args):
-    from src.rag_chain import ask
+    from src.pipeline import ask
 
-    resposta = ask(args.question)
+    config = _load_service_config(args.service)
+    resposta = ask(config, args.question)
     print(f"\n{LARANJA}{resposta}{RESET}")
 
 
-def cmd_chat(_args):
-    from src.rag_chain import DragPipeline
+def cmd_chat(args):
+    from src.pipeline import DragPipeline
     from src.logger import (
         log_chain_montada, log_pronto,
         log_separador_conversas, log_interacao, log_encerramento,
     )
 
-    pipeline = DragPipeline()
-    log_chain_montada()
+    config = _load_service_config(args.service)
+    pipeline = DragPipeline(config)
+
+    log_chain_montada(list(config.pipeline_steps))
     log_pronto()
     log_separador_conversas()
-    print("Chat DRAG iniciado. Digite 'sair' para encerrar.\n")
+    print(f"Chat DRAG iniciado ({config.display_name}). Digite 'sair' para encerrar.\n")
 
     interacao_num = 0
     while True:
@@ -133,27 +147,36 @@ def cmd_chat(_args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="DRAG com LangChain + Redis"
+        description="DRAG Multi-Serviço + LangChain + Redis"
+    )
+    parser.add_argument(
+        "--service", "-s", default=None,
+        help="Nome do serviço (default: auto-detecta)"
     )
     subparsers = parser.add_subparsers(dest="command")
 
     # Comando: ingest
     ingest_parser = subparsers.add_parser("ingest", help="Indexar documentos no Redis")
     ingest_parser.add_argument(
-        "--docs-dir", default="fontes", help="Diretório com os documentos (default: fontes)"
+        "--docs-dir", default=None, help="Diretório com os documentos (sobrescreve o YAML)"
     )
     ingest_parser.add_argument(
         "--force", action="store_true", help="Forçar reingestão mesmo sem mudanças nos documentos"
+    )
+    ingest_parser.add_argument(
+        "--service", "-s", default=None, help="Nome do serviço"
     )
     ingest_parser.set_defaults(func=cmd_ingest)
 
     # Comando: ask
     ask_parser = subparsers.add_parser("ask", help="Fazer uma pergunta ao DRAG")
     ask_parser.add_argument("question", help="Pergunta para o DRAG")
+    ask_parser.add_argument("--service", "-s", default=None, help="Nome do serviço")
     ask_parser.set_defaults(func=cmd_ask)
 
     # Comando: chat
     chat_parser = subparsers.add_parser("chat", help="Chat interativo com o DRAG")
+    chat_parser.add_argument("--service", "-s", default=None, help="Nome do serviço")
     chat_parser.set_defaults(func=cmd_chat)
 
     args = parser.parse_args()

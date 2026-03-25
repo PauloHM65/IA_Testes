@@ -1,85 +1,147 @@
-"""Configuração centralizada: lê .env via os.getenv com acesso lazy."""
+"""Configuração centralizada: globals do .env + ServiceConfig por YAML."""
 
 from __future__ import annotations
 
 import os
-from functools import lru_cache
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import yaml
+
+SERVICES_DIR = Path(__file__).parent.parent / "services"
 
 
-def _int(key: str, default: int) -> int:
-    return int(os.getenv(key, str(default)))
+# ---------------------------------------------------------------------------
+# Globals (compartilhados entre todos os serviços — lidos do .env)
+# ---------------------------------------------------------------------------
 
-
-def _str(key: str, default: str) -> str:
-    return os.getenv(key, default)
-
-
-# Propriedades de módulo com acesso lazy (lê os.getenv no momento do acesso,
-# não no momento do import — assim load_dotenv() no main.py tem efeito).
-
-class _Config:
-    """Proxy que lê variáveis de ambiente sob demanda."""
+class _Globals:
+    """Variáveis de ambiente globais (Redis, Ollama). Leitura lazy."""
 
     @property
     def REDIS_URL(self) -> str:
-        return _str("REDIS_URL", "redis://localhost:6379")
+        return os.getenv("REDIS_URL", "redis://localhost:6379")
 
     @property
     def OLLAMA_BASE_URL(self) -> str:
-        return _str("OLLAMA_BASE_URL", "http://localhost:11434")
+        return os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
-    @property
-    def LLM_MODEL(self) -> str:
-        return _str("LLM_MODEL", "qwen2.5:14b")
 
-    @property
-    def EMBEDDING_MODEL(self) -> str:
-        return _str("EMBEDDING_MODEL", "intfloat/multilingual-e5-base")
+env = _Globals()
 
-    @property
-    def RERANK_MODEL(self) -> str:
-        return _str("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 
-    @property
-    def RERANK_TOP_N(self) -> int:
-        return _int("RERANK_TOP_N", 5)
+# ---------------------------------------------------------------------------
+# ServiceConfig (específico por serviço — lido do YAML)
+# ---------------------------------------------------------------------------
 
-    @property
-    def RETRIEVER_K(self) -> int:
-        return _int("RETRIEVER_K", 20)
+@dataclass(frozen=True)
+class ServiceConfig:
+    """Configuração de um serviço DRAG, carregada de um arquivo YAML."""
 
-    @property
-    def MULTI_QUERY_N(self) -> int:
-        return _int("MULTI_QUERY_N", 3)
+    # Identidade
+    name: str
+    display_name: str
+    docs_dir: str
 
-    @property
-    def NEIGHBOR_WINDOW(self) -> int:
-        return _int("NEIGHBOR_WINDOW", 2)
+    # Modelos
+    llm_model: str
+    embedding_model: str
+    rerank_model: str
 
-    @property
-    def CHUNK_SIZE(self) -> int:
-        return _int("CHUNK_SIZE", 1500)
+    # Parâmetros de ingestão
+    chunk_size: int
+    chunk_overlap: int
 
-    @property
-    def CHUNK_OVERLAP(self) -> int:
-        return _int("CHUNK_OVERLAP", 300)
+    # Parâmetros de busca
+    retriever_k: int
+    rerank_top_n: int
+    multi_query_n: int
+    neighbor_window: int
+
+    # Pipeline
+    pipeline_steps: tuple[str, ...] = ()
+
+    # Prompts
+    system_prompt: str = ""
+    human_prompt: str = "{question}"
+
+    # Derivados (calculados a partir do name)
+    index_name: str = ""
+    chunks_map_key: str = ""
+    hash_key: str = ""
+
+    def __post_init__(self):
+        # frozen=True exige object.__setattr__ para derivados
+        if not self.index_name:
+            object.__setattr__(self, "index_name", f"rag_{self.name}")
+        if not self.chunks_map_key:
+            object.__setattr__(self, "chunks_map_key", f"rag_chunks_map_{self.name}")
+        if not self.hash_key:
+            object.__setattr__(self, "hash_key", f"rag_docs_hash_{self.name}")
+
+    @classmethod
+    def load(cls, name: str) -> ServiceConfig:
+        """Carrega config de services/{name}.yaml."""
+        path = SERVICES_DIR / f"{name}.yaml"
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Serviço '{name}' não encontrado. "
+                f"Crie o arquivo: {path}"
+            )
+
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+
+        return cls(
+            name=data["name"],
+            display_name=data.get("display_name", data["name"]),
+            docs_dir=data.get("docs_dir", "fontes"),
+            llm_model=data.get("llm_model", "qwen2.5:14b"),
+            embedding_model=data.get("embedding_model", "intfloat/multilingual-e5-base"),
+            rerank_model=data.get("rerank_model", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
+            chunk_size=int(data.get("chunk_size", 1500)),
+            chunk_overlap=int(data.get("chunk_overlap", 300)),
+            retriever_k=int(data.get("retriever_k", 20)),
+            rerank_top_n=int(data.get("rerank_top_n", 5)),
+            multi_query_n=int(data.get("multi_query_n", 3)),
+            neighbor_window=int(data.get("neighbor_window", 2)),
+            pipeline_steps=tuple(data.get("pipeline_steps", [
+                "multi_query", "retrieve", "neighbors", "rerank", "generate", "latex_to_unicode",
+            ])),
+            system_prompt=data.get("system_prompt", ""),
+            human_prompt=data.get("human_prompt", "{question}"),
+        )
 
     def as_dict(self) -> dict[str, str]:
-        """Retorna todas as configurações como dict para logging."""
+        """Retorna configuração completa para logging."""
         return {
-            "REDIS_URL": self.REDIS_URL,
-            "OLLAMA_BASE_URL": self.OLLAMA_BASE_URL,
-            "LLM_MODEL": self.LLM_MODEL,
-            "EMBEDDING_MODEL": self.EMBEDDING_MODEL,
-            "RERANK_MODEL": self.RERANK_MODEL,
-            "RERANK_TOP_N": str(self.RERANK_TOP_N),
-            "RETRIEVER_K": str(self.RETRIEVER_K),
-            "MULTI_QUERY_N": str(self.MULTI_QUERY_N),
-            "NEIGHBOR_WINDOW": str(self.NEIGHBOR_WINDOW),
-            "CHUNK_SIZE": str(self.CHUNK_SIZE),
-            "CHUNK_OVERLAP": str(self.CHUNK_OVERLAP),
+            "service": self.name,
+            "display_name": self.display_name,
+            "docs_dir": self.docs_dir,
+            "llm_model": self.llm_model,
+            "embedding_model": self.embedding_model,
+            "rerank_model": self.rerank_model,
+            "chunk_size": str(self.chunk_size),
+            "chunk_overlap": str(self.chunk_overlap),
+            "retriever_k": str(self.retriever_k),
+            "rerank_top_n": str(self.rerank_top_n),
+            "multi_query_n": str(self.multi_query_n),
+            "neighbor_window": str(self.neighbor_window),
+            "pipeline_steps": ", ".join(self.pipeline_steps),
+            "index_name": self.index_name,
         }
 
 
-# Instância singleton — importar como: from src.config import cfg
-cfg = _Config()
+def list_services() -> list[str]:
+    """Retorna nomes dos serviços disponíveis (arquivos YAML em services/)."""
+    if not SERVICES_DIR.exists():
+        return []
+    return sorted(p.stem for p in SERVICES_DIR.glob("*.yaml"))
+
+
+def get_default_service() -> str:
+    """Retorna o serviço padrão. Se só há 1, usa ele. Senão, 'default'."""
+    services = list_services()
+    if len(services) == 1:
+        return services[0]
+    return "default"

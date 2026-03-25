@@ -1,4 +1,4 @@
-"""Módulo DRAG: Retrieval-Augmented Generation com MultiQuery, reranking e vizinhos."""
+"""Pipeline DRAG plugável: etapas configuráveis por serviço via YAML."""
 
 from __future__ import annotations
 
@@ -12,13 +12,13 @@ from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_ollama import ChatOllama
-from langchain_redis import RedisVectorStore
+from langchain_redis import RedisConfig, RedisVectorStore
 from sentence_transformers import CrossEncoder
 
-from src.config import cfg
-from src.ingest import get_embeddings
+from src.config import ServiceConfig, env
+from src.embeddings import get_embeddings
 
-logger = logging.getLogger("drag.multiquery")
+logger = logging.getLogger("drag.pipeline")
 
 
 # ---------------------------------------------------------------------------
@@ -37,30 +37,25 @@ class DragResult:
 
 
 # ---------------------------------------------------------------------------
-# Prompts
+# Dados transitórios entre etapas do pipeline
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """\
-REGRA OBRIGATÓRIA DE FORMATAÇÃO:
-- PROIBIDO usar LaTeX, \\sum, \\frac, \\(, \\), \\[, \\], $, $$.
-- Use APENAS símbolos Unicode: Σ para somatório, ∈ para pertence, ≤ ≥ ≠ × ÷ √ ∞ π ² ³ → ⇒ ∀ ∃.
-- Frações: escreva como n(n+1)/2, nunca como \\frac.
-- Exemplo correto: Σ(i=1 até n) i = n(n+1)/2
-- Exemplo ERRADO: \\sum_{{i=1}}^{{n}} i = \\frac{{n(n+1)}}{{2}}
+@dataclass
+class PipelineData:
+    """Estado passado entre etapas do pipeline."""
+    pergunta: str
+    raw_chunks: list = field(default_factory=list)
+    generated_queries: list[str] = field(default_factory=list)
+    raw_count: int = 0
+    chunks: list = field(default_factory=list)
+    contexto: str = ""
+    resposta: str = ""
+    rerank_count: int = 0
 
-Você é um professor universitário com doutorado em todas as áreas de exatas. Use SOMENTE o contexto abaixo para responder.
-Se o contexto tiver informação relacionada à pergunta, use-a para responder, \
-mesmo que não cubra 100% da pergunta.
-Se o contexto não tiver NADA relacionado ao tema da pergunta, diga que não tem \
-informação suficiente. Nunca invente informação que não esteja no contexto.
-Cada trecho do contexto tem uma tag [Fonte: ...] com o nome do arquivo de origem.
-Quando citar informações, mencione a fonte correta.
 
-Contexto:
-{context}
-"""
-
-HUMAN_PROMPT = "{question}\n\nLembre-se: responda usando símbolos Unicode (Σ, ∈, ≤, ², →), NUNCA LaTeX."
+# ---------------------------------------------------------------------------
+# Prompt padrão do MultiQuery
+# ---------------------------------------------------------------------------
 
 MULTI_QUERY_PROMPT = ChatPromptTemplate.from_messages([
     ("system",
@@ -127,96 +122,158 @@ def latex_to_unicode(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# DragPipeline — encapsula todo o pipeline DRAG
+# Captura de queries geradas pelo MultiQueryRetriever
+# ---------------------------------------------------------------------------
+
+class _capture_multiquery:
+    """Context manager que intercepta as queries geradas pelo MultiQueryRetriever."""
+
+    def __init__(self, retriever: MultiQueryRetriever, output: list[str]):
+        self._retriever = retriever
+        self._output = output
+        self._original = None
+
+    def __enter__(self):
+        original_generate = self._retriever.generate_queries
+
+        def _capturing_generate(question, run_manager):
+            queries = original_generate(question, run_manager)
+            self._output.extend(queries)
+            return queries
+
+        self._original = original_generate
+        self._retriever.generate_queries = _capturing_generate
+        return self
+
+    def __exit__(self, *exc):
+        self._retriever.generate_queries = self._original
+
+
+# ---------------------------------------------------------------------------
+# DragPipeline — etapas plugáveis configuradas por YAML
 # ---------------------------------------------------------------------------
 
 class DragPipeline:
-    """Pipeline DRAG completo: MultiQuery → Retrieve → Neighbors → Rerank → LLM."""
+    """Pipeline DRAG com etapas plugáveis definidas no ServiceConfig."""
 
-    def __init__(self):
+    def __init__(self, config: ServiceConfig):
+        self.config = config
+
+        # Componentes compartilhados
+        self._redis = redis_lib.from_url(env.REDIS_URL)
+        self._llm = ChatOllama(
+            model=config.llm_model,
+            base_url=env.OLLAMA_BASE_URL,
+            temperature=0.0,
+        )
+        self._reranker = CrossEncoder(config.rerank_model)
+
+        # Vectorstore + retrievers
         self._vectorstore = self._build_vectorstore()
-        self._llm = self._build_llm()
         self._base_retriever = self._vectorstore.as_retriever(
-            search_type="similarity", search_kwargs={"k": cfg.RETRIEVER_K}
+            search_type="similarity", search_kwargs={"k": config.retriever_k}
         )
         self._multi_retriever = self._build_multi_retriever()
-        self._answer_chain = self._build_answer_chain()
-        self._reranker = CrossEncoder(cfg.RERANK_MODEL)
-        self._redis = redis_lib.from_url(cfg.REDIS_URL)
 
-    # --- Builders privados ---
+        # Answer chain (prompt do serviço)
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", config.system_prompt),
+            ("human", config.human_prompt),
+        ])
+        self._answer_chain = prompt | self._llm | StrOutputParser()
 
-    @staticmethod
-    def _build_vectorstore() -> RedisVectorStore:
-        from langchain_redis import RedisConfig
+        # Registro de etapas disponíveis
+        self._steps: dict[str, callable] = {
+            "multi_query": self._step_multi_query,
+            "retrieve": self._step_retrieve,
+            "neighbors": self._step_neighbors,
+            "rerank": self._step_rerank,
+            "generate": self._step_generate,
+            "latex_to_unicode": self._step_latex_to_unicode,
+        }
 
-        client = redis_lib.from_url(cfg.REDIS_URL)
+    # --- Builders ---
+
+    def _build_vectorstore(self) -> RedisVectorStore:
         try:
-            client.ping()
+            self._redis.ping()
         except redis_lib.exceptions.ConnectionError:
             raise ConnectionError(
-                f"Não foi possível conectar ao Redis em '{cfg.REDIS_URL}'. "
+                f"Não foi possível conectar ao Redis em '{env.REDIS_URL}'. "
                 f"Verifique se o container está rodando: docker compose up -d"
             )
 
+        embeddings = get_embeddings(self.config.embedding_model)
         return RedisVectorStore(
-            embeddings=get_embeddings(),
+            embeddings=embeddings,
             config=RedisConfig(
-                index_name="rag_docs",
-                redis_url=cfg.REDIS_URL,
+                index_name=self.config.index_name,
+                redis_url=env.REDIS_URL,
                 from_existing=True,
             ),
-        )
-
-    @staticmethod
-    def _build_llm() -> ChatOllama:
-        return ChatOllama(
-            model=cfg.LLM_MODEL,
-            base_url=cfg.OLLAMA_BASE_URL,
-            temperature=0.0,
         )
 
     def _build_multi_retriever(self) -> MultiQueryRetriever:
         return MultiQueryRetriever.from_llm(
             retriever=self._base_retriever,
             llm=self._llm,
-            prompt=MULTI_QUERY_PROMPT.partial(n=str(cfg.MULTI_QUERY_N)),
+            prompt=MULTI_QUERY_PROMPT.partial(n=str(self.config.multi_query_n)),
         )
-
-    def _build_answer_chain(self):
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", SYSTEM_PROMPT),
-            ("human", HUMAN_PROMPT),
-        ])
-        return prompt | self._llm | StrOutputParser()
 
     # --- Etapas do pipeline ---
 
-    def _retrieve(self, pergunta: str) -> tuple[list, list[str]]:
-        """MultiQuery → Retrieve. Retorna (chunks_únicos, queries_geradas)."""
-        generated_queries: list[str] = []
+    def _step_multi_query(self, data: PipelineData) -> PipelineData:
+        """Gera variações da pergunta e busca para cada uma."""
+        with _capture_multiquery(self._multi_retriever, data.generated_queries):
+            data.raw_chunks = self._multi_retriever.invoke(data.pergunta)
+        data.raw_count = len(data.raw_chunks)
+        return data
 
-        def _capture_queries(info: dict):
-            queries = info.get("queries", info.get("result", []))
-            generated_queries.extend(queries)
+    def _step_retrieve(self, data: PipelineData) -> PipelineData:
+        """Busca vetorial direta (sem MultiQuery). Usado quando multi_query não está no pipeline."""
+        if not data.raw_chunks:
+            data.raw_chunks = self._base_retriever.invoke(data.pergunta)
+            data.raw_count = len(data.raw_chunks)
+        return data
 
-        handler = type("CaptureHandler", (), {
-            "on_retriever_end": lambda self, *a, **kw: None,
-            "on_retriever_error": lambda self, *a, **kw: None,
-        })()
+    def _step_neighbors(self, data: PipelineData) -> PipelineData:
+        """Expande cada chunk com vizinhos adjacentes do Redis."""
+        data.chunks = self._fetch_neighbors(data.raw_chunks)
+        return data
 
-        # MultiQueryRetriever gera variações e busca para cada uma
-        with _capture_multiquery(self._multi_retriever, generated_queries):
-            raw_chunks = self._multi_retriever.invoke(pergunta)
+    def _step_rerank(self, data: PipelineData) -> PipelineData:
+        """Reordena com cross-encoder e mantém top_n."""
+        source = data.chunks if data.chunks else data.raw_chunks
+        if not source:
+            return data
+        pairs = [[data.pergunta, doc.page_content] for doc in source]
+        scores = self._reranker.predict(pairs)
+        ranked = sorted(zip(scores, source), key=lambda x: x[0], reverse=True)
+        data.chunks = [doc for _, doc in ranked[:self.config.rerank_top_n]]
+        data.rerank_count = len(data.chunks)
+        return data
 
-        return raw_chunks, generated_queries
+    def _step_generate(self, data: PipelineData) -> PipelineData:
+        """Formata contexto e gera resposta com LLM."""
+        data.contexto = self._format_docs(data.chunks)
+        data.resposta = self._answer_chain.invoke({
+            "context": data.contexto,
+            "question": data.pergunta,
+        })
+        return data
+
+    def _step_latex_to_unicode(self, data: PipelineData) -> PipelineData:
+        """Converte LaTeX residual para Unicode."""
+        data.resposta = latex_to_unicode(data.resposta)
+        return data
+
+    # --- Helpers ---
 
     def _fetch_neighbors(self, chunks: list) -> list:
         """Para cada chunk, busca vizinhos adjacentes no Redis com hmget."""
-        window = cfg.NEIGHBOR_WINDOW
+        window = self.config.neighbor_window
 
-        # Descobre limites por fonte
-        all_keys = self._redis.hkeys("rag_chunks_map")
+        all_keys = self._redis.hkeys(self.config.chunks_map_key)
         max_index_per_source: dict[str, int] = {}
         for raw_key in all_keys:
             key_str = raw_key.decode("utf-8") if isinstance(raw_key, bytes) else raw_key
@@ -231,7 +288,6 @@ class DragPipeline:
             if source not in max_index_per_source or idx > max_index_per_source[source]:
                 max_index_per_source[source] = idx
 
-        # Coleta todas as chaves de vizinhos necessárias
         seen = set()
         keys_to_fetch: list[str] = []
         fetch_meta: list[tuple[str, int]] = []
@@ -260,10 +316,9 @@ class DragPipeline:
                     keys_to_fetch.append(redis_key)
                     fetch_meta.append((source, neighbor_idx))
 
-        # Busca todos os vizinhos de uma vez com hmget
         neighbor_docs: dict[tuple[str, int], Document] = {}
         if keys_to_fetch:
-            values = self._redis.hmget("rag_chunks_map", keys_to_fetch)
+            values = self._redis.hmget(self.config.chunks_map_key, keys_to_fetch)
             for (source, idx), content in zip(fetch_meta, values):
                 if content:
                     neighbor_docs[(source, idx)] = Document(
@@ -271,7 +326,6 @@ class DragPipeline:
                         metadata={"source": source, "chunk_index": idx},
                     )
 
-        # Monta lista expandida: chunks originais + vizinhos
         expanded = []
         added = set()
         for chunk in chunks:
@@ -302,15 +356,6 @@ class DragPipeline:
         ))
         return expanded
 
-    def _rerank(self, query: str, docs: list) -> list:
-        """Reordena documentos usando cross-encoder e retorna os top_n."""
-        if not docs:
-            return docs
-        pairs = [[query, doc.page_content] for doc in docs]
-        scores = self._reranker.predict(pairs)
-        ranked = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
-        return [doc for _, doc in ranked[:cfg.RERANK_TOP_N]]
-
     @staticmethod
     def _format_docs(docs: list) -> str:
         parts = []
@@ -322,85 +367,62 @@ class DragPipeline:
     # --- Invocação pública ---
 
     def invoke(self, pergunta: str, status: list | None = None) -> DragResult:
-        """Executa o pipeline completo: MultiQuery → Retrieve → Neighbors → Rerank → LLM."""
+        """Executa as etapas definidas no config.pipeline_steps."""
+        steps = self.config.pipeline_steps
+        total = len(steps)
 
-        def _set(msg: str):
+        step_labels = {
+            "multi_query": "Gerando variações da pergunta (MultiQuery)",
+            "retrieve": "Buscando chunks relevantes",
+            "neighbors": "Expandindo com vizinhos adjacentes",
+            "rerank": "Reranking com cross-encoder",
+            "generate": "Gerando resposta com LLM",
+            "latex_to_unicode": "Formatando resposta",
+        }
+
+        data = PipelineData(pergunta=pergunta)
+
+        for i, step_name in enumerate(steps, 1):
             if status is not None:
-                status[0] = msg
+                label = step_labels.get(step_name, step_name)
+                status[0] = f"[{i}/{total}] {label}..."
 
-        _set("[1/6] Gerando variações da pergunta (MultiQuery)...")
-        raw_chunks, generated_queries = self._retrieve(pergunta)
-        raw_count = len(raw_chunks)
-
-        _set("[2/6] Expandindo com vizinhos adjacentes...")
-        expanded_chunks = self._fetch_neighbors(raw_chunks)
-
-        _set("[3/6] Reranking com cross-encoder...")
-        ranked_chunks = self._rerank(pergunta, expanded_chunks)
-        rerank_count = len(ranked_chunks)
-
-        _set("[4/6] Formatando contexto...")
-        contexto = self._format_docs(ranked_chunks)
-
-        _set("[5/6] Gerando resposta com LLM...")
-        resposta = self._answer_chain.invoke({"context": contexto, "question": pergunta})
-
-        _set("[6/6] Formatando resposta...")
-        resposta = latex_to_unicode(resposta)
+            step_fn = self._steps.get(step_name)
+            if step_fn is None:
+                logger.warning(f"Etapa desconhecida ignorada: {step_name}")
+                continue
+            data = step_fn(data)
 
         return DragResult(
-            resposta=resposta,
-            chunks=ranked_chunks,
-            contexto=contexto,
-            generated_queries=generated_queries,
-            raw_count=raw_count,
-            rerank_count=rerank_count,
+            resposta=data.resposta,
+            chunks=data.chunks,
+            contexto=data.contexto,
+            generated_queries=data.generated_queries,
+            raw_count=data.raw_count,
+            rerank_count=data.rerank_count,
         )
 
+    # --- Registro de etapas customizadas ---
 
-# ---------------------------------------------------------------------------
-# Captura de queries geradas pelo MultiQueryRetriever
-# ---------------------------------------------------------------------------
-
-class _capture_multiquery:
-    """Context manager que intercepta as queries geradas pelo MultiQueryRetriever."""
-
-    def __init__(self, retriever: MultiQueryRetriever, output: list[str]):
-        self._retriever = retriever
-        self._output = output
-        self._original = None
-
-    def __enter__(self):
-        original_generate = self._retriever.generate_queries
-
-        def _capturing_generate(question, run_manager):
-            queries = original_generate(question, run_manager)
-            self._output.extend(queries)
-            return queries
-
-        self._original = original_generate
-        self._retriever.generate_queries = _capturing_generate
-        return self
-
-    def __exit__(self, *exc):
-        self._retriever.generate_queries = self._original
+    def register_step(self, name: str, fn: callable):
+        """Registra uma etapa customizada no pipeline."""
+        self._steps[name] = fn
 
 
 # ---------------------------------------------------------------------------
 # Atalho para uso direto (cmd_ask)
 # ---------------------------------------------------------------------------
 
-_pipeline_cache: DragPipeline | None = None
+_pipeline_cache: dict[str, DragPipeline] = {}
 
 
-def get_pipeline() -> DragPipeline:
-    global _pipeline_cache
-    if _pipeline_cache is None:
-        _pipeline_cache = DragPipeline()
-    return _pipeline_cache
+def get_pipeline(config: ServiceConfig) -> DragPipeline:
+    if config.name not in _pipeline_cache:
+        _pipeline_cache[config.name] = DragPipeline(config)
+    return _pipeline_cache[config.name]
 
 
-def ask(question: str) -> str:
+def ask(config: ServiceConfig, question: str) -> str:
     """Faz uma pergunta ao DRAG e retorna a resposta."""
-    result = get_pipeline().invoke(question)
+    result = get_pipeline(config).invoke(question)
     return result.resposta
