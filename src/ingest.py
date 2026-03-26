@@ -157,8 +157,48 @@ def index_documents(chunks: list, config: ServiceConfig) -> RedisVectorStore:
     return vectorstore
 
 
-def run_ingest(config: ServiceConfig, force: bool = False) -> RedisVectorStore | None:
-    """Pipeline completo de ingestão. Pula se os documentos não mudaram."""
+def _ingest_directory(docs_dir: str, index_name: str, chunks_map_key: str,
+                      config: ServiceConfig, label: str) -> RedisVectorStore | None:
+    """Ingere um diretório específico num índice Redis."""
+    docs_path = Path(docs_dir)
+    if not docs_path.exists() or not any(docs_path.rglob("*")):
+        from src.logger import log_alerta
+        log_alerta(f"{label}: diretório '{docs_dir}' vazio ou não existe. Pulando.")
+        return None
+
+    from src.logger import log_embeddings_carregado
+    embeddings = get_embeddings(config.embedding_model)
+    log_embeddings_carregado(config.embedding_model)
+
+    documents = load_documents(docs_dir)
+    chunks = split_documents(documents, config)
+
+    # Usa index_name e chunks_map_key específicos
+    _drop_existing_index(index_name)
+
+    vectorstore = RedisVectorStore.from_documents(
+        documents=chunks,
+        embedding=embeddings,
+        redis_url=env.REDIS_URL,
+        index_name=index_name,
+    )
+
+    client = redis_lib.from_url(env.REDIS_URL)
+    client.delete(chunks_map_key)
+    for chunk in chunks:
+        source = chunk.metadata.get("source", "desconhecido")
+        idx = chunk.metadata.get("chunk_index", 0)
+        key = f"{source}:{idx}"
+        client.hset(chunks_map_key, key, chunk.page_content)
+
+    from src.logger import log_indexacao_redis
+    log_indexacao_redis(len(chunks), env.REDIS_URL, index_name)
+
+    return vectorstore
+
+
+def run_ingest(config: ServiceConfig, force: bool = False) -> bool | None:
+    """Pipeline completo de ingestão. Ingere matérias e exercícios em índices separados."""
     # Validação de conexão Redis
     try:
         client = redis_lib.from_url(env.REDIS_URL)
@@ -169,7 +209,7 @@ def run_ingest(config: ServiceConfig, force: bool = False) -> RedisVectorStore |
             f"Verifique se o container está rodando: docker compose up -d"
         )
 
-    # Ingestão incremental
+    # Ingestão incremental — hash cobre todo o docs_dir (materias + exercicios)
     if not force:
         current_hash = _compute_docs_hash(config.docs_dir)
         stored_hash = _get_stored_hash(config)
@@ -178,14 +218,24 @@ def run_ingest(config: ServiceConfig, force: bool = False) -> RedisVectorStore |
             log_alerta("Documentos não mudaram desde a última ingestão. Pulando.")
             return None
 
-    from src.logger import log_embeddings_carregado
-    embeddings = get_embeddings(config.embedding_model)
-    log_embeddings_carregado(config.embedding_model)
+    # Ingere matérias
+    _ingest_directory(
+        docs_dir=config.materias_dir,
+        index_name=config.index_name,
+        chunks_map_key=config.chunks_map_key,
+        config=config,
+        label="Matérias",
+    )
 
-    documents = load_documents(config.docs_dir)
-    chunks = split_documents(documents, config)
-    vectorstore = index_documents(chunks, config)
+    # Ingere exercícios
+    _ingest_directory(
+        docs_dir=config.exercicios_dir,
+        index_name=config.exercicios_index_name,
+        chunks_map_key=config.exercicios_chunks_map_key,
+        config=config,
+        label="Exercícios",
+    )
 
     _store_hash(config, _compute_docs_hash(config.docs_dir))
 
-    return vectorstore
+    return True

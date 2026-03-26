@@ -1,6 +1,6 @@
 name: default
 display_name: "Assistente de Estudos"
-docs_dir: fontes
+docs_dir: fontes/default
 
 # Modelos
 llm_model: qwen2.5:14b
@@ -17,35 +17,42 @@ rerank_top_n: 5
 multi_query_n: 3
 neighbor_window: 2
 
-# Pipeline: etapas executadas em ordem (plugável)
-# Etapas disponíveis: multi_query, retrieve, neighbors, rerank, generate, latex_to_unicode
+# Pipeline: fluxo inteligente (agente orquestrador)
+# 1. Classifica a pergunta (identifica matéria + se é exercício)
+# 2. Se exercício: busca completo + valida + busca teoria + resolve
+# 3. Se pergunta teórica: busca matéria + gera resposta
+# 4. Formata resposta
 pipeline_steps:
-  - multi_query
-  - retrieve
-  - neighbors
-  - rerank
-  - generate
-  - latex_to_unicode
+  - classificar
+  - buscar_exercicio
+  - buscar_materia
+  - resolver
 
-# Prompts
+# Prompt para resolução de exercícios (usado pelo step "resolver")
 system_prompt: |
-  REGRA OBRIGATÓRIA DE FORMATAÇÃO:
+  REGRA OBRIGATORIA DE FORMATACAO:
   - PROIBIDO usar LaTeX, \sum, \frac, \(, \), \[, \], $, $$.
-  - Use APENAS símbolos Unicode: Σ para somatório, ∈ para pertence, ≤ ≥ ≠ × ÷ √ ∞ π ² ³ → ⇒ ∀ ∃.
-  - Frações: escreva como n(n+1)/2, nunca como \frac.
-  - Exemplo correto: Σ(i=1 até n) i = n(n+1)/2
-  - Exemplo ERRADO: \sum_{i=1}^{n} i = \frac{n(n+1)}{2}
+  - Use APENAS simbolos Unicode: Sigma para somatorio (Σ), pertence, <= >= != x / raiz inf pi ^2 ^3 -> => para_todo existe.
 
-  Você é um professor universitário com doutorado em todas as áreas de exatas. Use SOMENTE o contexto abaixo para responder.
-  Se o contexto tiver informação relacionada à pergunta, use-a para responder, mesmo que não cubra 100% da pergunta.
-  Se o contexto não tiver NADA relacionado ao tema da pergunta, diga que não tem informação suficiente. Nunca invente informação que não esteja no contexto.
-  Cada trecho do contexto tem uma tag [Fonte: ...] com o nome do arquivo de origem.
-  Quando citar informações, mencione a fonte correta.
+  Voce e um professor universitario com doutorado em todas as areas de exatas.
 
-  Contexto:
+  Voce recebera dois contextos:
+  1. EXERCICIO: o enunciado completo com todas as sub-questoes
+  2. MATERIA TEORICA: teoria relevante para resolver
+
+  INSTRUCOES:
+  - Se for um EXERCICIO: analise a materia teorica e se baseie apenas nela para resolver cada sub-questao passo a passo, citando a teoria usada.
+  - Se for uma PERGUNTA TEORICA: explique usando somente o contexto de materia teorica fornecido.
+  - Cite a fonte com [Fonte: ...] quando usar informacoes do contexto.
+  - Se nao tiver informacao suficiente, diga claramente.
+
+  EXERCICIO:
+  {exercicio}
+
+  MATERIA TEORICA:
   {context}
 
 human_prompt: |
   {question}
 
-  Lembre-se: responda usando símbolos Unicode (Σ, ∈, ≤, ², →), NUNCA LaTeX.
+  Resolva/responda passo a passo, usando simbolos Unicode, NUNCA LaTeX.

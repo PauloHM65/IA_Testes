@@ -65,17 +65,32 @@ class ServiceConfig:
     system_prompt: str = ""
     human_prompt: str = "{question}"
 
+    # Referência a outro serviço (ex: buscar matéria de outro índice)
+    materia_service: str = ""
+
     # Derivados (calculados a partir do name)
-    index_name: str = ""
+    materias_dir: str = ""
+    exercicios_dir: str = ""
+    index_name: str = ""           # índice de matérias
+    exercicios_index_name: str = ""  # índice de exercícios
     chunks_map_key: str = ""
+    exercicios_chunks_map_key: str = ""
     hash_key: str = ""
 
     def __post_init__(self):
         # frozen=True exige object.__setattr__ para derivados
+        if not self.materias_dir:
+            object.__setattr__(self, "materias_dir", f"{self.docs_dir}/materias")
+        if not self.exercicios_dir:
+            object.__setattr__(self, "exercicios_dir", f"{self.docs_dir}/exercicios")
         if not self.index_name:
             object.__setattr__(self, "index_name", f"rag_{self.name}")
+        if not self.exercicios_index_name:
+            object.__setattr__(self, "exercicios_index_name", f"rag_{self.name}_exercicios")
         if not self.chunks_map_key:
             object.__setattr__(self, "chunks_map_key", f"rag_chunks_map_{self.name}")
+        if not self.exercicios_chunks_map_key:
+            object.__setattr__(self, "exercicios_chunks_map_key", f"rag_chunks_map_{self.name}_exercicios")
         if not self.hash_key:
             object.__setattr__(self, "hash_key", f"rag_docs_hash_{self.name}")
 
@@ -110,6 +125,7 @@ class ServiceConfig:
             ])),
             system_prompt=data.get("system_prompt", ""),
             human_prompt=data.get("human_prompt", "{question}"),
+            materia_service=data.get("materia_service", ""),
         )
 
     def as_dict(self) -> dict[str, str]:
@@ -129,6 +145,9 @@ class ServiceConfig:
             "neighbor_window": str(self.neighbor_window),
             "pipeline_steps": ", ".join(self.pipeline_steps),
             "index_name": self.index_name,
+            "exercicios_index_name": self.exercicios_index_name,
+            "materias_dir": self.materias_dir,
+            "exercicios_dir": self.exercicios_dir,
         }
 
 

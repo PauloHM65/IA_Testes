@@ -10,3 +10,5 @@ unstructured[pdf]>=0.16,<0.17
 python-dotenv>=1,<2
 chardet>=3,<6
 pyyaml>=6,<7
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1

@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DRAG — Assistente de Estudos</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: #0f0f0f;
+            color: #e0e0e0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Header */
+        .header {
+            background: #1a1a1a;
+            border-bottom: 1px solid #2a2a2a;
+            padding: 12px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-shrink: 0;
+        }
+
+        .header h1 { font-size: 18px; font-weight: 600; color: #ff8c00; }
+
+        .header-right { display: flex; align-items: center; gap: 12px; }
+
+        .header select, .header button {
+            background: #2a2a2a;
+            color: #e0e0e0;
+            border: 1px solid #3a3a3a;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        .header select:focus, .header button:focus { outline: none; border-color: #ff8c00; }
+        .header button:hover { background: #3a3a3a; }
+        .header button.active { background: #ff8c00; color: #000; }
+
+        /* Main layout */
+        .main {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+        }
+
+        /* Sidebar — painel de arquivos */
+        .sidebar {
+            width: 280px;
+            background: #141414;
+            border-left: 1px solid #2a2a2a;
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+            transition: margin-right 0.3s;
+            order: 1;
+        }
+
+        .sidebar.hidden { margin-right: -280px; }
+
+        .sidebar-header {
+            padding: 12px 16px;
+            border-bottom: 1px solid #2a2a2a;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 13px;
+            font-weight: 600;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .sidebar-header label {
+            background: #ff8c00;
+            color: #000;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+
+        .sidebar-header label:hover { background: #ffaa33; }
+        .sidebar-header input[type="file"] { display: none; }
+
+        .file-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px 0;
+        }
+
+        .file-section {
+            padding: 8px 16px 4px;
+            font-size: 11px;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .file-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 16px;
+            font-size: 13px;
+            cursor: pointer;
+            transition: background 0.15s, opacity 0.3s;
+        }
+
+        .file-item:hover { background: #1e1e1e; }
+
+        .file-item input[type="checkbox"] {
+            accent-color: #ff8c00;
+            cursor: pointer;
+        }
+
+        .file-item .fname {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .file-item .fsize {
+            font-size: 11px;
+            color: #555;
+            flex-shrink: 0;
+        }
+
+        .file-item.ingesting { opacity: 0.4; }
+
+        .ingest-banner {
+            padding: 8px 16px;
+            background: #1a1500;
+            border-bottom: 1px solid #332a00;
+            font-size: 12px;
+            color: #ff8c00;
+            text-align: center;
+            animation: pulse 1.5s infinite;
+            display: none;
+        }
+
+        .ingest-banner.visible { display: block; }
+
+        /* Chat area */
+        .chat-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
+
+        .chat-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .message {
+            max-width: 80%;
+            padding: 12px 16px;
+            border-radius: 12px;
+            line-height: 1.6;
+            font-size: 15px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        .message.user {
+            align-self: flex-end;
+            background: #1e3a5f;
+            color: #c8e0ff;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.assistant {
+            align-self: flex-start;
+            background: #1a1a1a;
+            border: 1px solid #2a2a2a;
+            border-bottom-left-radius: 4px;
+        }
+
+        .message.status {
+            align-self: center;
+            background: transparent;
+            color: #ff8c00;
+            font-size: 13px;
+            padding: 4px 12px;
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .message .fontes {
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px solid #333;
+            font-size: 12px;
+            color: #888;
+        }
+
+        .message .fontes span {
+            display: inline-block;
+            background: #2a2a2a;
+            padding: 2px 8px;
+            border-radius: 4px;
+            margin: 2px 4px 2px 0;
+        }
+
+        /* Input area */
+        .input-area {
+            background: #1a1a1a;
+            border-top: 1px solid #2a2a2a;
+            padding: 16px 24px;
+            flex-shrink: 0;
+        }
+
+        .input-row {
+            display: flex;
+            gap: 12px;
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        .input-row input {
+            flex: 1;
+            background: #2a2a2a;
+            color: #e0e0e0;
+            border: 1px solid #3a3a3a;
+            padding: 12px 16px;
+            border-radius: 8px;
+            font-size: 15px;
+        }
+
+        .input-row input:focus { outline: none; border-color: #ff8c00; }
+        .input-row input::placeholder { color: #666; }
+
+        .input-row button {
+            background: #ff8c00;
+            color: #000;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .input-row button:hover { background: #ffaa33; }
+        .input-row button:disabled { background: #555; cursor: not-allowed; }
+
+        .empty-state {
+            text-align: center;
+            color: #555;
+            margin-top: 20vh;
+        }
+
+        .empty-state h2 { font-size: 24px; color: #ff8c00; margin-bottom: 8px; }
+
+        .chat-container::-webkit-scrollbar { width: 6px; }
+        .chat-container::-webkit-scrollbar-track { background: transparent; }
+        .chat-container::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+        .file-list::-webkit-scrollbar { width: 4px; }
+        .file-list::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>DRAG</h1>
+        <div class="header-right">
+            <select id="serviceSelect"></select>
+            <button id="sidebarToggle" class="active" onclick="toggleSidebar()">Fontes</button>
+        </div>
+    </div>
+
+    <div class="main">
+        <!-- Sidebar: arquivos -->
+        <div class="sidebar" id="sidebar">
+            <div class="ingest-banner" id="ingestBanner">Indexando documentos...</div>
+            <div class="sidebar-header">
+                <span>Documentos</span>
+                <label>
+                    Upload
+                    <input type="file" id="fileUpload" accept=".pdf,.txt" multiple
+                           onchange="uploadFiles(this.files)" />
+                </label>
+            </div>
+            <div class="file-list" id="fileList"></div>
+        </div>
+
+        <!-- Chat -->
+        <div class="chat-area">
+            <div class="chat-container" id="chat">
+                <div class="empty-state" id="emptyState">
+                    <h2>DRAG</h2>
+                    <p>Selecione um servico e faca sua pergunta.</p>
+                </div>
+            </div>
+
+            <div class="input-area">
+                <div class="input-row">
+                    <input type="text" id="questionInput" placeholder="Digite sua pergunta..."
+                           autocomplete="off" />
+                    <button id="sendBtn" onclick="sendMessage()">Enviar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const chat = document.getElementById('chat');
+        const questionInput = document.getElementById('questionInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const serviceSelect = document.getElementById('serviceSelect');
+        const emptyState = document.getElementById('emptyState');
+        const fileList = document.getElementById('fileList');
+        const ingestBanner = document.getElementById('ingestBanner');
+        const sidebar = document.getElementById('sidebar');
+        const sidebarToggle = document.getElementById('sidebarToggle');
+
+        let ws = null;
+        let statusEl = null;
+        let ingestPolling = null;
+        let selectedFiles = new Set();
+        let timerStart = null;
+        let timerInterval = null;
+
+        // =====================================================
+        // Servicos
+        // =====================================================
+        async function loadServices() {
+            try {
+                const res = await fetch('/api/services');
+                const services = await res.json();
+                serviceSelect.innerHTML = '';
+                services.forEach(s => {
+                    const opt = document.createElement('option');
+                    opt.value = s.name;
+                    opt.textContent = s.display_name;
+                    serviceSelect.appendChild(opt);
+                });
+                loadFiles();
+            } catch (e) {
+                serviceSelect.innerHTML = '<option>default</option>';
+            }
+        }
+
+        serviceSelect.addEventListener('change', () => {
+            selectedFiles.clear();
+            loadFiles();
+        });
+
+        // =====================================================
+        // Arquivos
+        // =====================================================
+        async function loadFiles() {
+            const service = serviceSelect.value;
+            try {
+                const res = await fetch(`/api/services/${service}/files`);
+                const files = await res.json();
+                renderFiles(files);
+            } catch (e) {
+                fileList.innerHTML = '<div style="padding:16px;color:#555">Erro ao carregar arquivos.</div>';
+            }
+        }
+
+        function renderFiles(files) {
+            fileList.innerHTML = '';
+
+            const materias = files.filter(f => f.tipo === 'materia');
+            const exercicios = files.filter(f => f.tipo === 'exercicio');
+
+            if (materias.length > 0) {
+                fileList.innerHTML += '<div class="file-section">Materias</div>';
+                materias.forEach(f => fileList.appendChild(createFileItem(f)));
+            }
+            if (exercicios.length > 0) {
+                fileList.innerHTML += '<div class="file-section">Exercicios</div>';
+                exercicios.forEach(f => fileList.appendChild(createFileItem(f)));
+            }
+            if (files.length === 0) {
+                fileList.innerHTML = '<div style="padding:16px;color:#555;font-size:13px">Nenhum documento. Use o botao Upload.</div>';
+            }
+        }
+
+        function createFileItem(file) {
+            const div = document.createElement('div');
+            div.className = 'file-item';
+            div.dataset.name = file.name;
+
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = selectedFiles.size === 0 || selectedFiles.has(file.name);
+            cb.addEventListener('change', () => {
+                if (cb.checked) {
+                    selectedFiles.add(file.name);
+                } else {
+                    selectedFiles.delete(file.name);
+                }
+            });
+
+            const fname = document.createElement('span');
+            fname.className = 'fname';
+            fname.textContent = file.name;
+            fname.title = file.path;
+
+            const fsize = document.createElement('span');
+            fsize.className = 'fsize';
+            fsize.textContent = formatSize(file.size);
+
+            div.appendChild(cb);
+            div.appendChild(fname);
+            div.appendChild(fsize);
+
+            return div;
+        }
+
+        function formatSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1048576) return (bytes / 1024).toFixed(0) + ' KB';
+            return (bytes / 1048576).toFixed(1) + ' MB';
+        }
+
+        // =====================================================
+        // Upload
+        // =====================================================
+        async function uploadFiles(fileInputFiles) {
+            const service = serviceSelect.value;
+
+            for (const file of fileInputFiles) {
+                const form = new FormData();
+                form.append('file', file);
+
+                try {
+                    await fetch(`/api/services/${service}/upload?tipo=materia`, {
+                        method: 'POST',
+                        body: form,
+                    });
+                } catch (e) {
+                    console.error('Upload falhou:', e);
+                }
+            }
+
+            // Recarrega lista e monitora ingestao
+            loadFiles();
+            startIngestPolling();
+
+            // Limpa o input
+            document.getElementById('fileUpload').value = '';
+        }
+
+        // =====================================================
+        // Polling de ingestao
+        // =====================================================
+        function startIngestPolling() {
+            const service = serviceSelect.value;
+            ingestBanner.classList.add('visible');
+
+            // Marca arquivos como ingesting
+            document.querySelectorAll('.file-item').forEach(el => el.classList.add('ingesting'));
+
+            if (ingestPolling) clearInterval(ingestPolling);
+            ingestPolling = setInterval(async () => {
+                try {
+                    const res = await fetch(`/api/services/${service}/ingest/status`);
+                    const data = await res.json();
+
+                    if (data.status !== 'running') {
+                        clearInterval(ingestPolling);
+                        ingestPolling = null;
+                        ingestBanner.classList.remove('visible');
+                        document.querySelectorAll('.file-item').forEach(el => el.classList.remove('ingesting'));
+                        loadFiles();
+                    }
+                } catch (e) {
+                    clearInterval(ingestPolling);
+                    ingestPolling = null;
+                    ingestBanner.classList.remove('visible');
+                }
+            }, 2000);
+        }
+
+        // =====================================================
+        // Sidebar toggle
+        // =====================================================
+        function toggleSidebar() {
+            sidebar.classList.toggle('hidden');
+            sidebarToggle.classList.toggle('active');
+        }
+
+        // =====================================================
+        // WebSocket
+        // =====================================================
+        function connectWS() {
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${location.host}/ws/chat`);
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+
+                if (data.type === 'status') {
+                    if (statusEl) {
+                        const elapsed = ((Date.now() - timerStart) / 1000).toFixed(1);
+                        statusEl.textContent = `${data.message}  (${elapsed}s)`;
+                    }
+                }
+                else if (data.type === 'response') {
+                    const totalTime = ((Date.now() - timerStart) / 1000).toFixed(1);
+                    if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+                    if (statusEl) statusEl.remove();
+                    statusEl = null;
+                    addMessage('assistant', data.resposta, data.fontes, totalTime);
+                    setLoading(false);
+                }
+                else if (data.type === 'error') {
+                    if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+                    if (statusEl) statusEl.remove();
+                    statusEl = null;
+                    addMessage('assistant', 'Erro: ' + data.message);
+                    setLoading(false);
+                }
+            };
+
+            ws.onclose = () => setTimeout(connectWS, 2000);
+        }
+
+        // =====================================================
+        // Chat
+        // =====================================================
+        function sendMessage() {
+            const question = questionInput.value.trim();
+            if (!question || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+            emptyState?.remove();
+            addMessage('user', question);
+            statusEl = addMessage('status', 'Pensando...');
+            timerStart = Date.now();
+            timerInterval = setInterval(() => {
+                if (statusEl) {
+                    const elapsed = ((Date.now() - timerStart) / 1000).toFixed(1);
+                    const currentMsg = statusEl.textContent.replace(/\s*\([\d.]+s\)$/, '');
+                    statusEl.textContent = `${currentMsg}  (${elapsed}s)`;
+                }
+            }, 100);
+
+            // Fontes selecionadas (se nenhum checkbox marcado, envia lista vazia = usa todos)
+            const fontes = [...selectedFiles];
+
+            ws.send(JSON.stringify({
+                service: serviceSelect.value,
+                question: question,
+                fontes_selecionadas: fontes,
+            }));
+
+            questionInput.value = '';
+            setLoading(true);
+        }
+
+        function addMessage(type, text, fontes, elapsed) {
+            const div = document.createElement('div');
+            div.className = `message ${type}`;
+            div.textContent = text;
+
+            if (elapsed) {
+                const timeDiv = document.createElement('div');
+                timeDiv.className = 'fontes';
+                timeDiv.innerHTML = `Tempo: <span>${elapsed}s</span>`;
+                div.appendChild(timeDiv);
+            }
+
+            if (fontes && fontes.length > 0) {
+                const fontesDiv = document.createElement('div');
+                fontesDiv.className = 'fontes';
+                fontesDiv.innerHTML = 'Fontes: ' + fontes.map(f => {
+                    const name = f.split('/').pop();
+                    return `<span>${name}</span>`;
+                }).join('');
+                div.appendChild(fontesDiv);
+            }
+
+            chat.appendChild(div);
+            chat.scrollTop = chat.scrollHeight;
+            return div;
+        }
+
+        function setLoading(loading) {
+            sendBtn.disabled = loading;
+            questionInput.disabled = loading;
+            if (!loading) questionInput.focus();
+        }
+
+        questionInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        // =====================================================
+        // Init
+        // =====================================================
+        loadServices();
+        connectWS();
+        questionInput.focus();
+    </script>
+</body>
+</html>
