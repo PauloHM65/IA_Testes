@@ -134,7 +134,7 @@ class DragPipeline:
         self._llm = ChatOllama(
             model=config.llm_model,
             base_url=env.OLLAMA_BASE_URL,
-            temperature=0.0,
+            temperature=0.55,
         )
         self._reranker = CrossEncoder(config.rerank_model)
 
