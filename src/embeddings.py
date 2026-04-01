@@ -5,14 +5,16 @@ from __future__ import annotations
 from langchain_huggingface import HuggingFaceEmbeddings
 
 
-class E5Embeddings(HuggingFaceEmbeddings):
-    """Wrapper que adiciona os prefixos 'query: ' / 'passage: ' exigidos por modelos E5."""
-
-    def embed_query(self, text: str) -> list[float]:
-        return super().embed_query(f"query: {text}")
-
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return super().embed_documents([f"passage: {t}" for t in texts])
+# Wrapper para modelos E5 (desativado — bge-m3 nao precisa de prefixos)
+# Manter caso volte para um modelo E5 no futuro.
+# class E5Embeddings(HuggingFaceEmbeddings):
+#     """Wrapper que adiciona os prefixos 'query: ' / 'passage: ' exigidos por modelos E5."""
+#
+#     def embed_query(self, text: str) -> list[float]:
+#         return super().embed_query(f"query: {text}")
+#
+#     def embed_documents(self, texts: list[str]) -> list[list[float]]:
+#         return super().embed_documents([f"passage: {t}" for t in texts])
 
 
 # Cache por model_name para evitar carregar o mesmo modelo 2x
@@ -24,7 +26,9 @@ def get_embeddings(model_name: str) -> HuggingFaceEmbeddings:
     if model_name in _cache:
         return _cache[model_name]
 
-    cls = E5Embeddings if "e5" in model_name.lower() else HuggingFaceEmbeddings
+    # Selecao de classe: E5 precisa de prefixos, outros modelos (bge-m3, etc) nao
+    # cls = E5Embeddings if "e5" in model_name.lower() else HuggingFaceEmbeddings
+    cls = HuggingFaceEmbeddings
 
     instance = cls(
         model_name=model_name,

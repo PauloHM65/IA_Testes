@@ -3,8 +3,10 @@ display_name: "Assistente de Estudos"
 docs_dir: fontes/default
 
 # Modelos
-llm_model: qwen2.5:14b
-embedding_model: intfloat/multilingual-e5-base
+llm_provider: gemini
+llm_model: gemini-2.5-flash
+# embedding_model: intfloat/multilingual-e5-base  # 768 dims, ~440MB
+embedding_model: BAAI/bge-m3  # 1024 dims, ~1.1GB, melhor separacao de conceitos
 rerank_model: cross-encoder/ms-marco-MiniLM-L-6-v2
 
 # Parâmetros de ingestão
@@ -34,10 +36,10 @@ system_prompt: |
   - PROIBIDO usar LaTeX, \sum, \frac, \(, \), \[, \], $, $$.
   - Use APENAS simbolos Unicode: Sigma para somatorio (Σ), pertence, <= >= != x / raiz inf pi ^2 ^3 -> => para_todo existe.
 
-  Voce e um professor universitario com doutorado em todas as areas de exatas.
+  Voce e um professor universitario com doutorado em todas as areas de física, matemática, química e principalmente computação.
 
-  Voce recebera dois contextos:
-  1. EXERCICIO: o enunciado completo com todas as sub-questoes
+  Voce pode receber dois tipos de pergunta:
+  1. EXERCICIO: vai estar declarado qual questao a ser feita
   2. MATERIA TEORICA: teoria relevante para resolver
 
   INSTRUCOES:

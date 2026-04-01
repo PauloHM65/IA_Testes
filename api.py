@@ -103,6 +103,8 @@ def get_services():
                 "name": config.name,
                 "display_name": config.display_name,
                 "pipeline_steps": list(config.pipeline_steps),
+                "llm_provider": config.llm_provider,
+                "llm_model": config.llm_model,
             })
         except Exception:
             result.append({"name": name, "display_name": name, "pipeline_steps": []})
@@ -309,6 +311,15 @@ async def ws_chat(ws: WebSocket):
                         fontes_selecionadas=fontes_selecionadas,
                     ),
                 )
+            except Exception as e:
+                status_task.cancel()
+                await ws.send_json({
+                    "type": "error",
+                    "message": str(e),
+                    "llm_provider": pipeline.active_provider,
+                    "llm_model": pipeline.active_model,
+                })
+                continue
             finally:
                 status_task.cancel()
 
@@ -320,6 +331,8 @@ async def ws_chat(ws: WebSocket):
                 "fontes": fontes,
                 "raw_count": result.raw_count,
                 "rerank_count": result.rerank_count,
+                "llm_provider": pipeline.active_provider,
+                "llm_model": pipeline.active_model,
             })
 
     except WebSocketDisconnect:

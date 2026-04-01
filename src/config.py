@@ -16,7 +16,7 @@ SERVICES_DIR = Path(__file__).parent.parent / "services"
 # ---------------------------------------------------------------------------
 
 class _Globals:
-    """Variáveis de ambiente globais (Redis, Ollama). Leitura lazy."""
+    """Variáveis de ambiente globais (Redis, Ollama, Gemini). Leitura lazy."""
 
     @property
     def REDIS_URL(self) -> str:
@@ -25,6 +25,10 @@ class _Globals:
     @property
     def OLLAMA_BASE_URL(self) -> str:
         return os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
+    @property
+    def GOOGLE_API_KEY(self) -> str:
+        return os.getenv("GOOGLE_API_KEY", "")
 
 
 env = _Globals()
@@ -44,6 +48,7 @@ class ServiceConfig:
     docs_dir: str
 
     # Modelos
+    llm_provider: str  # "ollama" ou "gemini"
     llm_model: str
     embedding_model: str
     rerank_model: str
@@ -111,8 +116,10 @@ class ServiceConfig:
             name=data["name"],
             display_name=data.get("display_name", data["name"]),
             docs_dir=data.get("docs_dir", "fontes"),
+            llm_provider=data.get("llm_provider", "ollama"),
             llm_model=data.get("llm_model", "qwen2.5:14b"),
-            embedding_model=data.get("embedding_model", "intfloat/multilingual-e5-base"),
+            # embedding_model default: era "intfloat/multilingual-e5-base" (768d)
+            embedding_model=data.get("embedding_model", "BAAI/bge-m3"),
             rerank_model=data.get("rerank_model", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
             chunk_size=int(data.get("chunk_size", 1500)),
             chunk_overlap=int(data.get("chunk_overlap", 300)),
@@ -134,6 +141,7 @@ class ServiceConfig:
             "service": self.name,
             "display_name": self.display_name,
             "docs_dir": self.docs_dir,
+            "llm_provider": self.llm_provider,
             "llm_model": self.llm_model,
             "embedding_model": self.embedding_model,
             "rerank_model": self.rerank_model,

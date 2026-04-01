@@ -45,6 +45,15 @@
         .header button:hover { background: #3a3a3a; }
         .header button.active { background: #ff8c00; color: #000; }
 
+        .model-badge {
+            font-size: 12px;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+        .model-badge.api { background: #1e3a1e; color: #4caf50; border: 1px solid #2e5a2e; }
+        .model-badge.local { background: #3a2a1e; color: #ff8c00; border: 1px solid #5a3a1e; }
+
         /* Main layout */
         .main {
             flex: 1;
@@ -117,6 +126,20 @@
         }
 
         .file-item:hover { background: #1e1e1e; }
+
+        .file-item .delete-btn {
+            display: none;
+            background: none;
+            border: none;
+            color: #666;
+            font-size: 15px;
+            cursor: pointer;
+            padding: 0 4px;
+            flex-shrink: 0;
+            line-height: 1;
+        }
+        .file-item:hover .delete-btn { display: inline; }
+        .file-item .delete-btn:hover { color: #ff4444; }
 
         .file-item input[type="checkbox"] {
             accent-color: #ff8c00;
@@ -284,6 +307,7 @@
     <div class="header">
         <h1>DRAG</h1>
         <div class="header-right">
+            <span id="modelBadge" class="model-badge"></span>
             <select id="serviceSelect"></select>
             <button id="sidebarToggle" class="active" onclick="toggleSidebar()">Fontes</button>
         </div>
@@ -340,6 +364,7 @@
         let selectedFiles = new Set();
         let timerStart = null;
         let timerInterval = null;
+        let servicesData = [];
 
         // =====================================================
         // Servicos
@@ -347,22 +372,37 @@
         async function loadServices() {
             try {
                 const res = await fetch('/api/services');
-                const services = await res.json();
+                servicesData = await res.json();
                 serviceSelect.innerHTML = '';
-                services.forEach(s => {
+                servicesData.forEach(s => {
                     const opt = document.createElement('option');
                     opt.value = s.name;
                     opt.textContent = s.display_name;
                     serviceSelect.appendChild(opt);
                 });
+                updateModelBadge();
                 loadFiles();
             } catch (e) {
                 serviceSelect.innerHTML = '<option>default</option>';
             }
         }
 
+        function updateModelBadge() {
+            const current = servicesData.find(s => s.name === serviceSelect.value);
+            if (!current || !current.llm_provider) return;
+            updateModelBadgeDirect(current.llm_provider, current.llm_model);
+        }
+
+        function updateModelBadgeDirect(provider, model) {
+            const badge = document.getElementById('modelBadge');
+            const isApi = provider !== 'ollama';
+            badge.textContent = `${isApi ? 'API' : 'Local'} · ${model}`;
+            badge.className = `model-badge ${isApi ? 'api' : 'local'}`;
+        }
+
         serviceSelect.addEventListener('change', () => {
             selectedFiles.clear();
+            updateModelBadge();
             loadFiles();
         });
 
@@ -424,11 +464,36 @@
             fsize.className = 'fsize';
             fsize.textContent = formatSize(file.size);
 
+            const delBtn = document.createElement('button');
+            delBtn.className = 'delete-btn';
+            delBtn.textContent = '\u00D7';
+            delBtn.title = 'Excluir arquivo';
+            delBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                deleteFile(file.name, file.tipo);
+            });
+
             div.appendChild(cb);
             div.appendChild(fname);
             div.appendChild(fsize);
+            div.appendChild(delBtn);
 
             return div;
+        }
+
+        async function deleteFile(filename, tipo) {
+            if (!confirm(`Excluir "${filename}"?`)) return;
+            const service = serviceSelect.value;
+            try {
+                await fetch(`/api/services/${service}/files/${encodeURIComponent(filename)}?tipo=${tipo}`, {
+                    method: 'DELETE',
+                });
+                selectedFiles.delete(filename);
+                loadFiles();
+                startIngestPolling();
+            } catch (e) {
+                console.error('Erro ao excluir:', e);
+            }
         }
 
         function formatSize(bytes) {
@@ -527,6 +592,10 @@
                     statusEl = null;
                     addMessage('assistant', data.resposta, data.fontes, totalTime);
                     setLoading(false);
+                    // Atualiza badge se o provider mudou (fallback)
+                    if (data.llm_provider && data.llm_model) {
+                        updateModelBadgeDirect(data.llm_provider, data.llm_model);
+                    }
                 }
                 else if (data.type === 'error') {
                     if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
@@ -534,6 +603,9 @@
                     statusEl = null;
                     addMessage('assistant', 'Erro: ' + data.message);
                     setLoading(false);
+                    if (data.llm_provider && data.llm_model) {
+                        updateModelBadgeDirect(data.llm_provider, data.llm_model);
+                    }
                 }
             };
 

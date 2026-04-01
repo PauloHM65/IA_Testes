@@ -11,6 +11,7 @@ from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_ollama import ChatOllama
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_redis import RedisConfig, RedisVectorStore
 from sentence_transformers import CrossEncoder
 
@@ -18,6 +19,26 @@ from src.config import ServiceConfig, env
 from src.embeddings import get_embeddings
 
 logger = logging.getLogger("drag.pipeline")
+
+
+def _is_api_exhausted(exc: Exception) -> bool:
+    """Detecta se a excecao indica quota/rate-limit esgotado da API."""
+    # Checa pelo tipo da exceção (google.api_core.exceptions.ResourceExhausted)
+    exc_type = type(exc).__name__.lower()
+    if "resourceexhausted" in exc_type or "ratelimit" in exc_type:
+        return True
+    # Checa toda a cadeia de exceções (causa raiz)
+    cause = exc.__cause__ or exc.__context__
+    if cause:
+        cause_type = type(cause).__name__.lower()
+        if "resourceexhausted" in cause_type or "ratelimit" in cause_type:
+            return True
+    # Checa pela mensagem de erro
+    err_msg = str(exc).lower()
+    return any(term in err_msg for term in (
+        "429", "quota", "resource_exhausted", "resourceexhausted",
+        "rate limit", "rate_limit", "too many requests",
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -126,16 +147,31 @@ STEP_LABELS = {
 class DragPipeline:
     """Pipeline DRAG com etapas plugaveis definidas no ServiceConfig."""
 
+    # Modelo local de fallback (usado quando a API esgota)
+    FALLBACK_LLM_MODEL = "qwen2.5:14b"
+
     def __init__(self, config: ServiceConfig):
         self.config = config
 
+        # Provider ativo (pode mudar em runtime via fallback)
+        self.active_provider: str = config.llm_provider
+        self.active_model: str = config.llm_model
+
         # Componentes compartilhados (usados pelos steps)
         self._redis = redis_lib.from_url(env.REDIS_URL)
-        self._llm = ChatOllama(
-            model=config.llm_model,
-            base_url=env.OLLAMA_BASE_URL,
-            temperature=0.55,
-        )
+        if config.llm_provider == "gemini":
+            self._llm = ChatGoogleGenerativeAI(
+                model=config.llm_model,
+                google_api_key=env.GOOGLE_API_KEY,
+                temperature=0.55,
+                max_retries=0,
+            )
+        else:
+            self._llm = ChatOllama(
+                model=config.llm_model,
+                base_url=env.OLLAMA_BASE_URL,
+                temperature=0.55,
+            )
         self._reranker = CrossEncoder(config.rerank_model)
 
         # Vectorstore + retrievers
@@ -289,6 +325,26 @@ class DragPipeline:
             parts.append(f"[Fonte: {source}]\n{doc.page_content}")
         return "\n\n---\n\n".join(parts)
 
+    # --- Fallback para modelo local ---
+
+    def _fallback_to_ollama(self):
+        """Troca o LLM para Ollama local quando a API esgota."""
+        logger.warning("API esgotada — alternando para modelo local (Ollama).")
+        self.active_provider = "ollama"
+        self.active_model = self.FALLBACK_LLM_MODEL
+        self._llm = ChatOllama(
+            model=self.FALLBACK_LLM_MODEL,
+            base_url=env.OLLAMA_BASE_URL,
+            temperature=0.55,
+        )
+        # Recria chains que dependem do LLM
+        self._multi_retriever = self._build_multi_retriever()
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", self.config.system_prompt),
+            ("human", self.config.human_prompt),
+        ])
+        self._answer_chain = prompt | self._llm | StrOutputParser()
+
     # --- Invocacao publica ---
 
     def invoke(self, pergunta: str, status: list | None = None,
@@ -311,7 +367,19 @@ class DragPipeline:
             if step_fn is None:
                 logger.warning(f"Etapa desconhecida ignorada: {step_name}")
                 continue
-            data = step_fn(data, self)
+
+            try:
+                data = step_fn(data, self)
+            except Exception as e:
+                logger.error("Erro no step '%s': [%s] %s", step_name, type(e).__name__, e)
+                if self.active_provider != "ollama" and _is_api_exhausted(e):
+                    logger.warning("Fallback ativado para Ollama.")
+                    if status is not None:
+                        status[0] = "API esgotada — alternando para modelo local..."
+                    self._fallback_to_ollama()
+                    data = step_fn(data, self)
+                else:
+                    raise
 
         return DragResult(
             resposta=data.resposta,
