@@ -45,14 +45,51 @@
         .header button:hover { background: #3a3a3a; }
         .header button.active { background: #ff8c00; color: #000; }
 
+        .model-container { position: relative; }
         .model-badge {
             font-size: 12px;
             padding: 4px 10px;
             border-radius: 4px;
             font-weight: 600;
+            cursor: pointer;
+            user-select: none;
         }
+        .model-badge:hover { opacity: 0.85; }
         .model-badge.api { background: #1e3a1e; color: #4caf50; border: 1px solid #2e5a2e; }
         .model-badge.local { background: #3a2a1e; color: #ff8c00; border: 1px solid #5a3a1e; }
+        .model-dropdown {
+            display: none;
+            position: absolute;
+            top: 100%;
+            right: 0;
+            margin-top: 6px;
+            background: #2a2a2a;
+            border: 1px solid #3a3a3a;
+            border-radius: 8px;
+            min-width: 220px;
+            z-index: 100;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+            overflow: hidden;
+        }
+        .model-dropdown.open { display: block; }
+        .model-option {
+            padding: 10px 14px;
+            font-size: 13px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .model-option:hover { background: #3a3a3a; }
+        .model-option.active { color: #ff8c00; font-weight: 600; }
+        .model-option .ptag {
+            font-size: 10px;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-weight: 600;
+        }
+        .model-option .ptag.api { background: #1e3a1e; color: #4caf50; }
+        .model-option .ptag.local { background: #3a2a1e; color: #ff8c00; }
 
         /* Main layout */
         .main {
@@ -307,7 +344,10 @@
     <div class="header">
         <h1>DRAG</h1>
         <div class="header-right">
-            <span id="modelBadge" class="model-badge"></span>
+            <div class="model-container">
+                <span id="modelBadge" class="model-badge" onclick="toggleModelDropdown()"></span>
+                <div id="modelDropdown" class="model-dropdown"></div>
+            </div>
             <select id="serviceSelect"></select>
             <button id="sidebarToggle" class="active" onclick="toggleSidebar()">Fontes</button>
         </div>
@@ -365,6 +405,8 @@
         let timerStart = null;
         let timerInterval = null;
         let servicesData = [];
+        let availableModels = [];
+        let activeModel = { provider: '', model: '' };
 
         // =====================================================
         // Servicos
@@ -380,29 +422,93 @@
                     opt.textContent = s.display_name;
                     serviceSelect.appendChild(opt);
                 });
-                updateModelBadge();
                 loadFiles();
+                loadAvailableModels();
             } catch (e) {
                 serviceSelect.innerHTML = '<option>default</option>';
             }
         }
 
-        function updateModelBadge() {
-            const current = servicesData.find(s => s.name === serviceSelect.value);
-            if (!current || !current.llm_provider) return;
-            updateModelBadgeDirect(current.llm_provider, current.llm_model);
-        }
-
         function updateModelBadgeDirect(provider, model) {
             const badge = document.getElementById('modelBadge');
             const isApi = provider !== 'ollama';
-            badge.textContent = `${isApi ? 'API' : 'Local'} · ${model}`;
+            badge.textContent = `${isApi ? 'API' : 'Local'} \u00b7 ${model}`;
             badge.className = `model-badge ${isApi ? 'api' : 'local'}`;
+            activeModel = { provider, model };
+        }
+
+        async function loadAvailableModels() {
+            const service = serviceSelect.value;
+            try {
+                const res = await fetch(`/api/services/${service}/models`);
+                const data = await res.json();
+                availableModels = data.available || [];
+                updateModelBadgeDirect(data.active_provider, data.active_model);
+            } catch (e) {
+                availableModels = [];
+            }
+        }
+
+        function toggleModelDropdown() {
+            const dd = document.getElementById('modelDropdown');
+            dd.classList.toggle('open');
+            if (dd.classList.contains('open')) {
+                renderModelDropdown();
+                setTimeout(() => document.addEventListener('click', closeDropdownOutside, { once: true }), 0);
+            }
+        }
+
+        function closeDropdownOutside(e) {
+            const dd = document.getElementById('modelDropdown');
+            const badge = document.getElementById('modelBadge');
+            if (!dd.contains(e.target) && e.target !== badge) {
+                dd.classList.remove('open');
+            }
+        }
+
+        function renderModelDropdown() {
+            const dd = document.getElementById('modelDropdown');
+            dd.innerHTML = '';
+            availableModels.forEach(m => {
+                const div = document.createElement('div');
+                div.className = 'model-option';
+                if (m.provider === activeModel.provider && m.model === activeModel.model) {
+                    div.classList.add('active');
+                }
+                const isApi = m.provider !== 'ollama';
+                const tag = document.createElement('span');
+                tag.className = `ptag ${isApi ? 'api' : 'local'}`;
+                tag.textContent = isApi ? 'API' : 'Local';
+                const label = document.createElement('span');
+                label.textContent = m.label || m.model;
+                div.appendChild(tag);
+                div.appendChild(label);
+                div.addEventListener('click', () => switchModel(m.provider, m.model));
+                dd.appendChild(div);
+            });
+        }
+
+        async function switchModel(provider, model) {
+            document.getElementById('modelDropdown').classList.remove('open');
+            const service = serviceSelect.value;
+            try {
+                const res = await fetch(`/api/services/${service}/models/switch`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ provider, model }),
+                });
+                const data = await res.json();
+                if (data.status === 'ok') {
+                    updateModelBadgeDirect(data.active_provider, data.active_model);
+                }
+            } catch (e) {
+                console.error('Erro ao trocar modelo:', e);
+            }
         }
 
         serviceSelect.addEventListener('change', () => {
             selectedFiles.clear();
-            updateModelBadge();
+            loadAvailableModels();
             loadFiles();
         });
 
@@ -427,11 +533,17 @@
             const exercicios = files.filter(f => f.tipo === 'exercicio');
 
             if (materias.length > 0) {
-                fileList.innerHTML += '<div class="file-section">Materias</div>';
+                const header = document.createElement('div');
+                header.className = 'file-section';
+                header.textContent = 'Materias';
+                fileList.appendChild(header);
                 materias.forEach(f => fileList.appendChild(createFileItem(f)));
             }
             if (exercicios.length > 0) {
-                fileList.innerHTML += '<div class="file-section">Exercicios</div>';
+                const header = document.createElement('div');
+                header.className = 'file-section';
+                header.textContent = 'Exercicios';
+                fileList.appendChild(header);
                 exercicios.forEach(f => fileList.appendChild(createFileItem(f)));
             }
             if (files.length === 0) {
@@ -446,7 +558,9 @@
 
             const cb = document.createElement('input');
             cb.type = 'checkbox';
-            cb.checked = selectedFiles.size === 0 || selectedFiles.has(file.name);
+            const isSelected = selectedFiles.size === 0 || selectedFiles.has(file.name);
+            cb.checked = isSelected;
+            if (isSelected) selectedFiles.add(file.name);
             cb.addEventListener('change', () => {
                 if (cb.checked) {
                     selectedFiles.add(file.name);
@@ -631,13 +745,10 @@
                 }
             }, 100);
 
-            // Fontes selecionadas (se nenhum checkbox marcado, envia lista vazia = usa todos)
-            const fontes = [...selectedFiles];
-
             ws.send(JSON.stringify({
                 service: serviceSelect.value,
                 question: question,
-                fontes_selecionadas: fontes,
+                fontes_selecionadas: [...selectedFiles],
             }));
 
             questionInput.value = '';

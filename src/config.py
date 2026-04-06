@@ -70,6 +70,9 @@ class ServiceConfig:
     system_prompt: str = ""
     human_prompt: str = "{question}"
 
+    # Modelos disponíveis para seleção na UI
+    available_models: tuple[dict[str, str], ...] = ()
+
     # Referência a outro serviço (ex: buscar matéria de outro índice)
     materia_service: str = ""
 
@@ -133,6 +136,11 @@ class ServiceConfig:
             system_prompt=data.get("system_prompt", ""),
             human_prompt=data.get("human_prompt", "{question}"),
             materia_service=data.get("materia_service", ""),
+            available_models=tuple(data.get("available_models", [
+                {"provider": data.get("llm_provider", "ollama"),
+                 "model": data.get("llm_model", "qwen2.5:14b"),
+                 "label": data.get("llm_model", "qwen2.5:14b")}
+            ])),
         )
 
     def as_dict(self) -> dict[str, str]:

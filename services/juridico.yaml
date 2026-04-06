@@ -9,6 +9,18 @@ llm_model: gemini-2.5-flash
 embedding_model: BAAI/bge-m3  # 1024 dims, ~1.1GB, melhor separacao de conceitos
 rerank_model: cross-encoder/ms-marco-MiniLM-L-6-v2
 
+# Modelos disponíveis para seleção na UI
+available_models:
+  - provider: gemini
+    model: gemini-2.5-flash
+    label: "Gemini 2.5 Flash"
+  - provider: ollama
+    model: qwen2.5:14b
+    label: "Qwen 2.5 14B"
+  - provider: ollama
+    model: llama3:8b
+    label: "Llama 3 8B"
+
 # Parametros de ingestao
 chunk_size: 1500
 chunk_overlap: 300

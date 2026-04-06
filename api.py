@@ -19,7 +19,7 @@ load_dotenv()
 
 from src.config import ServiceConfig, list_services, get_default_service
 from src.pipeline import DragPipeline, get_pipeline, _pipeline_cache
-from src.ingest import run_ingest
+from src.ingest import RedisIngester
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +109,52 @@ def get_services():
         except Exception:
             result.append({"name": name, "display_name": name, "pipeline_steps": []})
     return result
+
+
+# ---------------------------------------------------------------------------
+# Endpoints: Modelos
+# ---------------------------------------------------------------------------
+
+@app.get("/api/services/{service}/models")
+def get_available_models(service: str):
+    """Retorna modelos disponiveis e o ativo."""
+    try:
+        config = ServiceConfig.load(service)
+    except FileNotFoundError:
+        raise HTTPException(404, f"Servico '{service}' nao encontrado.")
+
+    pipeline = get_pipeline(config)
+    return {
+        "active_provider": pipeline.active_provider,
+        "active_model": pipeline.active_model,
+        "available": list(config.available_models),
+    }
+
+
+class ModelSwitchRequest(BaseModel):
+    provider: str
+    model: str
+
+
+@app.post("/api/services/{service}/models/switch")
+def switch_model(service: str, req: ModelSwitchRequest):
+    """Troca o modelo ativo do pipeline."""
+    try:
+        config = ServiceConfig.load(service)
+    except FileNotFoundError:
+        raise HTTPException(404, f"Servico '{service}' nao encontrado.")
+
+    allowed = [(m["provider"], m["model"]) for m in config.available_models]
+    if (req.provider, req.model) not in allowed:
+        raise HTTPException(400, f"Modelo '{req.provider}/{req.model}' nao permitido.")
+
+    pipeline = get_pipeline(config)
+    pipeline.switch_model(req.provider, req.model)
+    return {
+        "status": "ok",
+        "active_provider": pipeline.active_provider,
+        "active_model": pipeline.active_model,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +252,7 @@ def _trigger_ingest(service: str, config: ServiceConfig):
     def _run():
         _ingest_status[service] = "running"
         try:
-            run_ingest(config, force=True)
+            RedisIngester(config).run(force=True)
             # Invalida cache do pipeline para recarregar o indice
             _pipeline_cache.pop(service, None)
             _ingest_status[service] = "done"
@@ -226,7 +272,7 @@ def ingest(service: str, force: bool = False):
         raise HTTPException(404, f"Servico '{service}' nao encontrado.")
 
     try:
-        result = run_ingest(config, force=force)
+        result = RedisIngester(config).run(force=force)
         if result is None:
             return IngestResponse(status="skipped", message="Documentos nao mudaram.")
         return IngestResponse(status="ok", message="Ingestao concluida.")
@@ -262,6 +308,8 @@ def chat(req: ChatRequest):
 # ---------------------------------------------------------------------------
 # WebSocket — chat com status + filtro de fontes
 # ---------------------------------------------------------------------------
+
+_ws_interaction_count: dict[str, int] = {}  # contador de interações por serviço
 
 @app.websocket("/ws/chat")
 async def ws_chat(ws: WebSocket):
@@ -334,6 +382,21 @@ async def ws_chat(ws: WebSocket):
                 "llm_provider": pipeline.active_provider,
                 "llm_model": pipeline.active_model,
             })
+
+            # Log da interacao
+            from src.logging import FileLogger
+            _ws_logger = FileLogger()
+            _ws_interaction_count[service_name] = _ws_interaction_count.get(service_name, 0) + 1
+            _ws_logger.interacao(
+                numero=_ws_interaction_count[service_name],
+                pergunta=question,
+                chunks=result.chunks,
+                contexto=result.contexto,
+                resposta=result.resposta,
+                generated_queries=result.generated_queries,
+                raw_count=result.raw_count,
+                rerank_count=result.rerank_count,
+            )
 
     except WebSocketDisconnect:
         pass
