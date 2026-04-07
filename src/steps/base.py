@@ -39,15 +39,62 @@ class PipelineData:
     exercicio_texto: str = ""
     exercicio_chunks: list = field(default_factory=list)
     materia_chunks: list = field(default_factory=list)
+    # Tempos de execucao por etapa (preenchido pelo decorator @timed_step)
+    timings: dict[str, float] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
-# Contexto compartilhado (injetado nos steps)
+# Contextos segregados (ISP) — cada step usa apenas o que precisa
+# ---------------------------------------------------------------------------
+
+@dataclass
+class LLMContext:
+    """Recursos de LLM: modelo e config."""
+    config: ServiceConfig
+    llm: BaseChatModel
+
+
+@dataclass
+class RedisContext:
+    """Recursos de Redis: conexao e config."""
+    config: ServiceConfig
+    redis: redis_lib.Redis
+
+
+@dataclass
+class RetrieverContext:
+    """Recursos de retrieval: retrievers e vectorstores."""
+    base_retriever: object
+    multi_retriever: object
+    vectorstore: RedisVectorStore
+    exercicios_vectorstore: RedisVectorStore | None = None
+
+
+@dataclass
+class RankerContext:
+    """Recursos de reranking."""
+    config: ServiceConfig
+    reranker: CrossEncoder
+
+
+@dataclass
+class ChainContext:
+    """Recursos de chain (prompt + LLM)."""
+    config: ServiceConfig
+    answer_chain: Runnable
+
+
+# ---------------------------------------------------------------------------
+# Contexto completo (compoe todos os sub-contextos)
 # ---------------------------------------------------------------------------
 
 @dataclass
 class PipelineContext:
-    """Recursos compartilhados injetados nos steps via construtor."""
+    """Recursos compartilhados injetados nos steps via construtor.
+
+    Compoe todos os sub-contextos. Steps que precisam de apenas uma fatia
+    podem acessar via propriedades tipadas (ex: ctx.llm_ctx).
+    """
 
     config: ServiceConfig
     redis: redis_lib.Redis
@@ -57,6 +104,32 @@ class PipelineContext:
     multi_retriever: object
     vectorstore: RedisVectorStore
     answer_chain: Runnable
+    exercicios_vectorstore: RedisVectorStore | None = None
+
+    @property
+    def llm_ctx(self) -> LLMContext:
+        return LLMContext(config=self.config, llm=self.llm)
+
+    @property
+    def redis_ctx(self) -> RedisContext:
+        return RedisContext(config=self.config, redis=self.redis)
+
+    @property
+    def retriever_ctx(self) -> RetrieverContext:
+        return RetrieverContext(
+            base_retriever=self.base_retriever,
+            multi_retriever=self.multi_retriever,
+            vectorstore=self.vectorstore,
+            exercicios_vectorstore=self.exercicios_vectorstore,
+        )
+
+    @property
+    def ranker_ctx(self) -> RankerContext:
+        return RankerContext(config=self.config, reranker=self.reranker)
+
+    @property
+    def chain_ctx(self) -> ChainContext:
+        return ChainContext(config=self.config, answer_chain=self.answer_chain)
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +144,13 @@ class BaseStep(ABC):
 
     def __init__(self, ctx: PipelineContext):
         self.ctx = ctx
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        # Aplica @timed_step automaticamente em toda subclasse concreta
+        if "execute" in cls.__dict__ and not getattr(cls.__dict__["execute"], "__isabstractmethod__", False):
+            from src.logging.performance import timed_step
+            cls.execute = timed_step(cls.execute)
 
     @abstractmethod
     def execute(self, data: PipelineData) -> PipelineData:

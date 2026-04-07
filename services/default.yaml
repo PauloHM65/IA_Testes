@@ -14,16 +14,16 @@ available_models:
   - provider: gemini
     model: gemini-2.5-flash
     label: "Gemini 2.5 Flash"
+  - provider: claude
+    model: claude-sonnet-4-6
+    label: "Claude Sonnet 4.6"
   - provider: ollama
     model: qwen2.5:14b
     label: "Qwen 2.5 14B"
-  - provider: ollama
-    model: llama3:8b
-    label: "Llama 3 8B"
 
 # Parâmetros de ingestão
-chunk_size: 1500
-chunk_overlap: 300
+chunk_size: 2500
+chunk_overlap: 500
 
 # Parâmetros de busca
 retriever_k: 20
@@ -42,31 +42,24 @@ pipeline_steps:
   - buscar_materia
   - resolver
 
-# Prompt para resolução de exercícios (usado pelo step "resolver")
+# Prompt do sistema (identidade e regras) e prompt do usuario (dados + pergunta)
 system_prompt: |
-  REGRA OBRIGATORIA DE FORMATACAO:
-  - PROIBIDO usar LaTeX, \sum, \frac, \(, \), \[, \], $, $$.
-  - Use APENAS simbolos Unicode: Sigma para somatorio (Σ), pertence, <= >= != x / raiz inf pi ^2 ^3 -> => para_todo existe.
+  Voce e um professor universitario com doutorado, especialista. Voce sempre explica com analogias, exemplos e sempre preza pelo rigor cientifico . Responda sempre em portugues.
 
-  Voce e um professor universitario com doutorado em todas as areas de física, matemática, química e principalmente computação.
+  COMPORTAMENTO:
+  - Resolva passo a passo, justificando cada etapa com a teoria fornecida.
+  - Cite a fonte com [Fonte: ...] ao usar informacoes do contexto.
+  - Se o contexto fornecido nao for suficiente, diga claramente o que falta.
+  - Nao invente informacoes alem do contexto fornecido.
 
-  Voce pode receber dois tipos de pergunta:
-  1. EXERCICIO: vai estar declarado qual questao a ser feita
-  2. MATERIA TEORICA: teoria relevante para resolver
-
-  INSTRUCOES:
-  - Se for um EXERCICIO: analise a materia teorica e se baseie apenas nela para resolver cada sub-questao passo a passo, citando a teoria usada.
-  - Se for uma PERGUNTA TEORICA: explique usando somente o contexto de materia teorica fornecido.
-  - Cite a fonte com [Fonte: ...] quando usar informacoes do contexto.
-  - Se nao tiver informacao suficiente, diga claramente.
-
+human_prompt: |
   EXERCICIO:
   {exercicio}
 
-  MATERIA TEORICA:
+  MATERIA TEORICA RELEVANTE:
   {context}
 
-human_prompt: |
+  PERGUNTA DO ALUNO:
   {question}
 
-  Resolva/responda passo a passo, usando simbolos Unicode, NUNCA LaTeX.
+  Resolva/responda passo a passo.

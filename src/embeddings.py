@@ -1,39 +1,75 @@
-"""Fábrica de embeddings: seleciona o modelo correto baseado no nome."""
+"""Fabrica de embeddings com registry e cache."""
 
 from __future__ import annotations
 
-from langchain_huggingface import HuggingFaceEmbeddings
+from abc import ABC, abstractmethod
+
+from langchain_core.embeddings import Embeddings
 
 
-# Wrapper para modelos E5 (desativado — bge-m3 nao precisa de prefixos)
-# Manter caso volte para um modelo E5 no futuro.
-# class E5Embeddings(HuggingFaceEmbeddings):
-#     """Wrapper que adiciona os prefixos 'query: ' / 'passage: ' exigidos por modelos E5."""
-#
-#     def embed_query(self, text: str) -> list[float]:
-#         return super().embed_query(f"query: {text}")
-#
-#     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-#         return super().embed_documents([f"passage: {t}" for t in texts])
+# ---------------------------------------------------------------------------
+# Registry de fabricas de embeddings
+# ---------------------------------------------------------------------------
+
+EMBEDDINGS_REGISTRY: dict[str, object] = {}
 
 
-# Cache por model_name para evitar carregar o mesmo modelo 2x
-_cache: dict[str, HuggingFaceEmbeddings] = {}
+class BaseEmbeddingsFactory(ABC):
+    """Fabrica abstrata para criar instancias de embeddings."""
+
+    provider_name: str = ""
+
+    @abstractmethod
+    def create(self, model_name: str) -> Embeddings:
+        ...
 
 
-def get_embeddings(model_name: str) -> HuggingFaceEmbeddings:
-    """Retorna instância de embeddings (cacheada por model_name)."""
-    if model_name in _cache:
-        return _cache[model_name]
+def register_embeddings(cls: type[BaseEmbeddingsFactory]) -> type[BaseEmbeddingsFactory]:
+    """Decorator que registra uma factory no EMBEDDINGS_REGISTRY."""
+    if cls.provider_name:
+        EMBEDDINGS_REGISTRY[cls.provider_name] = cls()
+    return cls
 
-    # Selecao de classe: E5 precisa de prefixos, outros modelos (bge-m3, etc) nao
-    # cls = E5Embeddings if "e5" in model_name.lower() else HuggingFaceEmbeddings
-    cls = HuggingFaceEmbeddings
 
-    instance = cls(
-        model_name=model_name,
-        model_kwargs={"device": "cpu"},
-    )
+# ---------------------------------------------------------------------------
+# Implementacao: HuggingFace (default)
+# ---------------------------------------------------------------------------
 
-    _cache[model_name] = instance
+@register_embeddings
+class HuggingFaceEmbeddingsFactory(BaseEmbeddingsFactory):
+    provider_name = "huggingface"
+
+    def create(self, model_name: str) -> Embeddings:
+        from langchain_huggingface import HuggingFaceEmbeddings
+        return HuggingFaceEmbeddings(
+            model_name=model_name,
+            model_kwargs={"device": "cpu"},
+        )
+
+
+# ---------------------------------------------------------------------------
+# Cache e funcao de acesso
+# ---------------------------------------------------------------------------
+
+_cache: dict[str, Embeddings] = {}
+
+# Provider padrao (pode ser sobrescrito via config no futuro)
+_default_provider = "huggingface"
+
+
+def get_embeddings(model_name: str, provider: str | None = None) -> Embeddings:
+    """Retorna instancia de embeddings (cacheada por model_name)."""
+    cache_key = f"{provider or _default_provider}:{model_name}"
+    if cache_key in _cache:
+        return _cache[cache_key]
+
+    factory = EMBEDDINGS_REGISTRY.get(provider or _default_provider)
+    if factory is None:
+        raise ValueError(
+            f"Embeddings provider '{provider}' nao registrado. "
+            f"Disponiveis: {list(EMBEDDINGS_REGISTRY.keys())}"
+        )
+
+    instance = factory.create(model_name)
+    _cache[cache_key] = instance
     return instance

@@ -30,6 +30,10 @@ class _Globals:
     def GOOGLE_API_KEY(self) -> str:
         return os.getenv("GOOGLE_API_KEY", "")
 
+    @property
+    def ANTHROPIC_API_KEY(self) -> str:
+        return os.getenv("ANTHROPIC_API_KEY", "")
+
 
 env = _Globals()
 
@@ -131,7 +135,7 @@ class ServiceConfig:
             multi_query_n=int(data.get("multi_query_n", 3)),
             neighbor_window=int(data.get("neighbor_window", 2)),
             pipeline_steps=tuple(data.get("pipeline_steps", [
-                "multi_query", "retrieve", "neighbors", "rerank", "generate", "latex_to_unicode",
+                "multi_query", "retrieve", "neighbors", "rerank", "generate",
             ])),
             system_prompt=data.get("system_prompt", ""),
             human_prompt=data.get("human_prompt", "{question}"),

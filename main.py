@@ -42,7 +42,7 @@ def cmd_ingest(args):
     spinner.update("Carregando modelo de embeddings...")
     spinner.start()
 
-    ingester = RedisIngester(config)
+    ingester = RedisIngester(config, logger)
     result = ingester.run(force=args.force)
 
     spinner.stop()

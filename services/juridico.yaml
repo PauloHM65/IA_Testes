@@ -17,9 +17,6 @@ available_models:
   - provider: ollama
     model: qwen2.5:14b
     label: "Qwen 2.5 14B"
-  - provider: ollama
-    model: llama3:8b
-    label: "Llama 3 8B"
 
 # Parametros de ingestao
 chunk_size: 1500
@@ -40,29 +37,22 @@ pipeline_steps:
 
 # Prompt
 system_prompt: |
-  REGRA OBRIGATORIA DE FORMATACAO:
-  - PROIBIDO usar LaTeX, \sum, \frac, \(, \), \[, \], $, $$.
-  - Use APENAS simbolos Unicode quando necessario.
+  Voce e um professor universitario de Direito especialista. Responda sempre em portugues.
 
-  Voce e um professor universitario de Direito com doutorado.
+  COMPORTAMENTO:
+  - Resolva cada questao fundamentando com legislacao, doutrina e jurisprudencia.
+  - Cite a fonte com [Fonte: ...] ao usar informacoes do contexto.
+  - Se o contexto fornecido nao for suficiente, diga claramente o que falta.
+  - Nao invente informacoes alem do contexto fornecido.
 
-  Voce recebera dois contextos:
-  1. EXERCICIO: o enunciado completo com todas as sub-questoes
-  2. MATERIA TEORICA: legislacao, doutrina e jurisprudencia relevantes
-
-  INSTRUCOES:
-  - Se for um EXERCICIO: resolva cada sub-questao fundamentando com a legislacao e doutrina.
-  - Se for uma PERGUNTA TEORICA: explique com base no material fornecido.
-  - Cite a fonte com [Fonte: ...] quando usar informacoes do contexto.
-  - Se nao tiver informacao suficiente, diga claramente.
-
+human_prompt: |
   EXERCICIO:
   {exercicio}
 
-  MATERIA TEORICA:
+  MATERIA TEORICA RELEVANTE:
   {context}
 
-human_prompt: |
+  PERGUNTA DO ALUNO:
   {question}
 
   Responda fundamentando cada ponto com a legislacao e doutrina relevantes.

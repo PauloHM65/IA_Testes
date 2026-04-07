@@ -18,16 +18,14 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from src.config import ServiceConfig, env
 from src.embeddings import get_embeddings
 from src.ingest.base import BaseIngester
-from src.logging.file_logger import get_logger
-
-logger = get_logger()
+from src.logging.base import IngestLogger
 
 
 class RedisIngester(BaseIngester):
     """Ingere documentos em indices Redis (materias + exercicios)."""
 
-    def __init__(self, config: ServiceConfig):
-        super().__init__(config)
+    def __init__(self, config: ServiceConfig, logger: IngestLogger):
+        super().__init__(config, logger)
         self._redis = redis_lib.from_url(env.REDIS_URL)
 
     def run(self, force: bool = False) -> bool | None:
@@ -45,7 +43,7 @@ class RedisIngester(BaseIngester):
             current_hash = self._compute_docs_hash(self.config.docs_dir)
             stored_hash = self._get_stored_hash()
             if current_hash == stored_hash:
-                logger.alerta("Documentos nao mudaram desde a ultima ingestao. Pulando.")
+                self.logger.alerta("Documentos nao mudaram desde a ultima ingestao. Pulando.")
                 return None
 
         # Ingere materias
@@ -73,11 +71,11 @@ class RedisIngester(BaseIngester):
                           chunks_map_key: str, label: str) -> RedisVectorStore | None:
         docs_path = Path(docs_dir)
         if not docs_path.exists() or not any(docs_path.rglob("*")):
-            logger.alerta(f"{label}: diretorio '{docs_dir}' vazio ou nao existe. Pulando.")
+            self.logger.alerta(f"{label}: diretorio '{docs_dir}' vazio ou nao existe. Pulando.")
             return None
 
         embeddings = get_embeddings(self.config.embedding_model)
-        logger.embeddings_carregado(self.config.embedding_model)
+        self.logger.embeddings_carregado(self.config.embedding_model)
 
         documents = self._load_documents(docs_dir)
         chunks = self._split_documents(documents)
@@ -98,7 +96,7 @@ class RedisIngester(BaseIngester):
             key = f"{source}:{idx}"
             self._redis.hset(chunks_map_key, key, chunk.page_content)
 
-        logger.indexacao_redis(len(chunks), env.REDIS_URL, index_name)
+        self.logger.indexacao_redis(len(chunks), env.REDIS_URL, index_name)
         return vectorstore
 
     def _load_documents(self, docs_dir: str) -> list:
@@ -126,13 +124,13 @@ class RedisIngester(BaseIngester):
         documents.extend(txt_loader.load())
 
         if failed_files:
-            logger.alerta(f"PDFs vazios ou corrompidos ignorados: {', '.join(failed_files)}")
+            self.logger.alerta(f"PDFs vazios ou corrompidos ignorados: {', '.join(failed_files)}")
 
         if not documents:
             raise ValueError(f"Nenhum documento encontrado em '{docs_dir}'.")
 
         fontes = sorted(set(doc.metadata.get("source", "?") for doc in documents))
-        logger.documentos_carregados(len(documents), fontes)
+        self.logger.documentos_carregados(len(documents), fontes)
         return documents
 
     def _split_documents(self, documents: list) -> list:
@@ -156,7 +154,7 @@ class RedisIngester(BaseIngester):
             chunk.metadata["chunk_index"] = idx
             source_counters[source] = idx + 1
 
-        logger.chunks_gerados(chunks, self.config.chunk_size, self.config.chunk_overlap)
+        self.logger.chunks_gerados(chunks, self.config.chunk_size, self.config.chunk_overlap)
         return chunks
 
     def _drop_index(self, index_name: str):

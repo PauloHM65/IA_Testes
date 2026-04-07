@@ -33,6 +33,7 @@ class DragResult:
     generated_queries: list[str] = field(default_factory=list)
     raw_count: int = 0
     rerank_count: int = 0
+    timings: dict[str, float] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -50,31 +51,85 @@ MULTI_QUERY_PROMPT = ChatPromptTemplate.from_messages([
 
 
 # ---------------------------------------------------------------------------
-# Captura de queries geradas pelo MultiQueryRetriever
+# PipelineBuilder — constroi todos os componentes do pipeline (SRP)
 # ---------------------------------------------------------------------------
 
-class _capture_multiquery:
-    """Context manager que intercepta as queries geradas pelo MultiQueryRetriever."""
+class PipelineBuilder:
+    """Constroi componentes (vectorstores, retrievers, chains) para o pipeline."""
 
-    def __init__(self, retriever: MultiQueryRetriever, output: list[str]):
-        self._retriever = retriever
-        self._output = output
-        self._original = None
+    def __init__(self, config: ServiceConfig, redis_conn: redis_lib.Redis,
+                 llm_provider: LLMProvider):
+        self.config = config
+        self.redis = redis_conn
+        self.llm_provider = llm_provider
 
-    def __enter__(self):
-        original_generate = self._retriever.generate_queries
+    def build_vectorstore(self, index_name: str) -> RedisVectorStore:
+        try:
+            self.redis.ping()
+        except redis_lib.exceptions.ConnectionError:
+            raise ConnectionError(
+                f"Nao foi possivel conectar ao Redis em '{env.REDIS_URL}'. "
+                f"Verifique se o container esta rodando: docker compose up -d"
+            )
 
-        def _capturing_generate(question, run_manager):
-            queries = original_generate(question, run_manager)
-            self._output.extend(queries)
-            return queries
+        embeddings = get_embeddings(self.config.embedding_model)
+        return RedisVectorStore(
+            embeddings=embeddings,
+            config=RedisConfig(
+                index_name=index_name,
+                redis_url=env.REDIS_URL,
+                from_existing=True,
+            ),
+        )
 
-        self._original = original_generate
-        self._retriever.generate_queries = _capturing_generate
-        return self
+    def build_exercicios_vectorstore(self) -> RedisVectorStore | None:
+        try:
+            return self.build_vectorstore(self.config.exercicios_index_name)
+        except Exception:
+            return None
 
-    def __exit__(self, *exc):
-        self._retriever.generate_queries = self._original
+    def build_multi_retriever(self, base_retriever) -> MultiQueryRetriever:
+        return MultiQueryRetriever.from_llm(
+            retriever=base_retriever,
+            llm=self.llm_provider.llm,
+            prompt=MULTI_QUERY_PROMPT.partial(n=str(self.config.multi_query_n)),
+        )
+
+    def build_answer_chain(self):
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", self.config.system_prompt),
+            ("human", self.config.human_prompt),
+        ])
+        return prompt | self.llm_provider.llm | StrOutputParser()
+
+    def build_reranker(self):
+        from sentence_transformers import CrossEncoder
+        return CrossEncoder(self.config.rerank_model)
+
+    def build_context(self, *, reranker, base_retriever, multi_retriever,
+                      vectorstore, exercicios_vectorstore,
+                      answer_chain) -> PipelineContext:
+        return PipelineContext(
+            config=self.config,
+            redis=self.redis,
+            llm=self.llm_provider.llm,
+            reranker=reranker,
+            base_retriever=base_retriever,
+            multi_retriever=multi_retriever,
+            vectorstore=vectorstore,
+            answer_chain=answer_chain,
+            exercicios_vectorstore=exercicios_vectorstore,
+        )
+
+    def build_steps(self, ctx: PipelineContext) -> list[BaseStep]:
+        instances = []
+        for step_name in self.config.pipeline_steps:
+            step_cls = STEP_REGISTRY.get(step_name)
+            if step_cls is None:
+                log.warning("Step '%s' nao encontrado no STEP_REGISTRY.", step_name)
+                continue
+            instances.append(step_cls(ctx))
+        return instances
 
 
 # ---------------------------------------------------------------------------
@@ -86,38 +141,34 @@ def _get_step_label(step: BaseStep) -> str:
 
 
 # ---------------------------------------------------------------------------
-# DragPipeline — executa steps OO na ordem do YAML
+# DragPipeline — orquestrador (apenas executa steps)
 # ---------------------------------------------------------------------------
 
 class DragPipeline:
-    """Pipeline DRAG com etapas OO plugaveis definidas no ServiceConfig."""
+    """Pipeline DRAG: orquestra a execucao de steps na ordem do YAML."""
 
     def __init__(self, config: ServiceConfig):
         self.config = config
 
-        # Garante que todos os steps estao registrados
         _load_all_steps()
 
-        # LLM Provider (multi-provider com fallback)
+        # Dependencias base
         self._llm_provider = LLMProvider(config.llm_provider, config.llm_model)
-
-        # Componentes compartilhados
         self._redis = redis_lib.from_url(env.REDIS_URL)
-        from sentence_transformers import CrossEncoder
-        self._reranker = CrossEncoder(config.rerank_model)
+        self._builder = PipelineBuilder(config, self._redis, self._llm_provider)
 
-        # Vectorstore + retrievers
-        self._vectorstore = self._build_vectorstore()
+        # Constroi componentes via builder
+        self._reranker = self._builder.build_reranker()
+        self._vectorstore = self._builder.build_vectorstore(config.index_name)
+        self._exercicios_vectorstore = self._builder.build_exercicios_vectorstore()
         self._base_retriever = self._vectorstore.as_retriever(
             search_type="similarity", search_kwargs={"k": config.retriever_k}
         )
-        self._multi_retriever = self._build_multi_retriever()
+        self._multi_retriever = self._builder.build_multi_retriever(self._base_retriever)
+        self._answer_chain = self._builder.build_answer_chain()
 
-        # Answer chain
-        self._answer_chain = self._build_answer_chain()
-
-        # Instancia os steps OO
-        self._step_instances = self._build_steps()
+        # Monta steps
+        self._step_instances = self._rebuild_steps()
 
     @property
     def active_provider(self) -> str:
@@ -127,96 +178,41 @@ class DragPipeline:
     def active_model(self) -> str:
         return self._llm_provider.active_model
 
-    # --- Builders ---
-
-    def _build_vectorstore(self) -> RedisVectorStore:
-        try:
-            self._redis.ping()
-        except redis_lib.exceptions.ConnectionError:
-            raise ConnectionError(
-                f"Nao foi possivel conectar ao Redis em '{env.REDIS_URL}'. "
-                f"Verifique se o container esta rodando: docker compose up -d"
-            )
-
-        embeddings = get_embeddings(self.config.embedding_model)
-        return RedisVectorStore(
-            embeddings=embeddings,
-            config=RedisConfig(
-                index_name=self.config.index_name,
-                redis_url=env.REDIS_URL,
-                from_existing=True,
-            ),
-        )
-
-    def _build_multi_retriever(self) -> MultiQueryRetriever:
-        return MultiQueryRetriever.from_llm(
-            retriever=self._base_retriever,
-            llm=self._llm_provider.llm,
-            prompt=MULTI_QUERY_PROMPT.partial(n=str(self.config.multi_query_n)),
-        )
-
-    def _build_answer_chain(self):
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", self.config.system_prompt),
-            ("human", self.config.human_prompt),
-        ])
-        return prompt | self._llm_provider.llm | StrOutputParser()
-
-    def _build_context(self) -> PipelineContext:
-        return PipelineContext(
-            config=self.config,
-            redis=self._redis,
-            llm=self._llm_provider.llm,
+    def _rebuild_steps(self) -> list[BaseStep]:
+        ctx = self._builder.build_context(
             reranker=self._reranker,
             base_retriever=self._base_retriever,
             multi_retriever=self._multi_retriever,
             vectorstore=self._vectorstore,
+            exercicios_vectorstore=self._exercicios_vectorstore,
             answer_chain=self._answer_chain,
         )
-
-    def _build_steps(self) -> list[BaseStep]:
-        ctx = self._build_context()
-        instances = []
-        for step_name in self.config.pipeline_steps:
-            step_cls = STEP_REGISTRY.get(step_name)
-            if step_cls is None:
-                log.warning("Step '%s' nao encontrado no STEP_REGISTRY.", step_name)
-                continue
-            instances.append(step_cls(ctx))
-        return instances
+        return self._builder.build_steps(ctx)
 
     # --- Switch de modelo ---
 
     def switch_model(self, provider: str, model: str):
         """Troca o LLM ativo em runtime e recria dependencias."""
         self._llm_provider.switch(provider, model)
-        self._multi_retriever = self._build_multi_retriever()
-        self._answer_chain = self._build_answer_chain()
-        # Recria contexto nos steps
-        self._step_instances = self._build_steps()
+        self._multi_retriever = self._builder.build_multi_retriever(self._base_retriever)
+        self._answer_chain = self._builder.build_answer_chain()
+        self._step_instances = self._rebuild_steps()
 
     def _fallback_to_ollama(self):
         self._llm_provider.fallback_to_local()
-        self._multi_retriever = self._build_multi_retriever()
-        self._answer_chain = self._build_answer_chain()
-        self._step_instances = self._build_steps()
-
-    # --- Helpers publicos (usados pelos steps via ctx) ---
-
-    @staticmethod
-    def format_docs(docs: list) -> str:
-        parts = []
-        for doc in docs:
-            source = doc.metadata.get("source", "desconhecido")
-            parts.append(f"[Fonte: {source}]\n{doc.page_content}")
-        return "\n\n---\n\n".join(parts)
+        self._multi_retriever = self._builder.build_multi_retriever(self._base_retriever)
+        self._answer_chain = self._builder.build_answer_chain()
+        self._step_instances = self._rebuild_steps()
 
     # --- Invocacao publica ---
 
     def invoke(self, pergunta: str, status: list | None = None,
                fontes_selecionadas: list[str] | None = None) -> DragResult:
         """Executa as etapas definidas no config.pipeline_steps."""
+        import time
+
         total = len(self._step_instances)
+        pipeline_start = time.perf_counter()
 
         data = PipelineData(
             pergunta=pergunta,
@@ -236,10 +232,12 @@ class DragPipeline:
                     if status is not None:
                         status[0] = "API esgotada — alternando para modelo local..."
                     self._fallback_to_ollama()
-                    # Retry com novo LLM (steps ja foram recriados)
                     data = self._step_instances[i - 1].execute(data)
                 else:
                     raise
+
+        total_time = time.perf_counter() - pipeline_start
+        data.timings["pipeline_total"] = total_time
 
         return DragResult(
             resposta=data.resposta,
@@ -248,11 +246,12 @@ class DragPipeline:
             generated_queries=data.generated_queries,
             raw_count=data.raw_count,
             rerank_count=data.rerank_count,
+            timings=data.timings,
         )
 
 
 # ---------------------------------------------------------------------------
-# Atalho para uso direto (cmd_ask, api.py)
+# Cache e atalhos
 # ---------------------------------------------------------------------------
 
 _pipeline_cache: dict[str, DragPipeline] = {}
@@ -262,6 +261,11 @@ def get_pipeline(config: ServiceConfig) -> DragPipeline:
     if config.name not in _pipeline_cache:
         _pipeline_cache[config.name] = DragPipeline(config)
     return _pipeline_cache[config.name]
+
+
+def invalidate_pipeline(service_name: str):
+    """Remove pipeline do cache (ex: apos re-ingestao)."""
+    _pipeline_cache.pop(service_name, None)
 
 
 def ask(config: ServiceConfig, question: str) -> str:

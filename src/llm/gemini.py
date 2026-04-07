@@ -4,9 +4,10 @@ from langchain_core.language_models import BaseChatModel
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from src.config import env
-from src.llm.base import BaseLLMFactory
+from src.llm.base import BaseLLMFactory, register_llm
 
 
+@register_llm
 class GeminiFactory(BaseLLMFactory):
     provider_name = "gemini"
 

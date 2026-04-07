@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 from langchain_core.documents import Document
-from langchain_redis import RedisConfig, RedisVectorStore
 
-from src.config import env
-from src.embeddings import get_embeddings
 from src.steps import register
-from src.steps.base import BaseStep, PipelineData, PipelineContext
+from src.steps.base import BaseStep, PipelineData
 
 EXERCICIO_SEQUENCIAL_CHUNKS = 20
 
@@ -24,14 +21,12 @@ class BuscarExercicioStep(BaseStep):
             data.exercicio_texto = ""
             return data
 
-        exercicios_vs = self._get_exercicios_vectorstore()
-        if exercicios_vs is None:
+        if self.ctx.exercicios_vectorstore is None:
             data.exercicio_texto = ""
             return data
 
         # Busca os chunks mais relevantes
-        search_kwargs = {"k": 5}
-        results = exercicios_vs.similarity_search(data.pergunta, **search_kwargs)
+        results = self.ctx.exercicios_vectorstore.similarity_search(data.pergunta, k=5)
 
         # Filtra por fonte selecionada pelo usuario ou identificada pelo classificador
         doc_filter = (
@@ -72,17 +67,3 @@ class BuscarExercicioStep(BaseStep):
         data.exercicio_texto = "\n\n".join(c.page_content for c in exercicio_chunks)
 
         return data
-
-    def _get_exercicios_vectorstore(self) -> RedisVectorStore | None:
-        try:
-            embeddings = get_embeddings(self.ctx.config.embedding_model)
-            return RedisVectorStore(
-                embeddings=embeddings,
-                config=RedisConfig(
-                    index_name=self.ctx.config.exercicios_index_name,
-                    redis_url=env.REDIS_URL,
-                    from_existing=True,
-                ),
-            )
-        except Exception:
-            return None

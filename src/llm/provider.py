@@ -6,26 +6,24 @@ import logging
 
 from langchain_core.language_models import BaseChatModel
 
-from src.llm.base import BaseLLMFactory
-from src.llm.ollama import OllamaFactory
-from src.llm.gemini import GeminiFactory
+from src.llm.base import LLM_REGISTRY
 
 logger = logging.getLogger("drag.llm")
 
-# Fabricas disponiveis (registrar novas aqui)
-_FACTORIES: dict[str, BaseLLMFactory] = {
-    "ollama": OllamaFactory(),
-    "gemini": GeminiFactory(),
-}
-
 FALLBACK_PROVIDER = "ollama"
 FALLBACK_MODEL = "qwen2.5:14b"
+
+
+def _load_all_factories():
+    """Importa todos os modulos de LLM para popular o LLM_REGISTRY."""
+    from src.llm import ollama, gemini, claude  # noqa: F401
 
 
 class LLMProvider:
     """Gerencia o LLM ativo, com switch em runtime e fallback automatico."""
 
     def __init__(self, provider: str, model: str, **kwargs):
+        _load_all_factories()
         self.active_provider = provider
         self.active_model = model
         self._kwargs = kwargs
@@ -51,11 +49,11 @@ class LLMProvider:
         self.switch(FALLBACK_PROVIDER, FALLBACK_MODEL)
 
     def _create(self, provider: str, model: str) -> BaseChatModel:
-        factory = _FACTORIES.get(provider)
+        factory = LLM_REGISTRY.get(provider)
         if factory is None:
             raise ValueError(
                 f"Provider '{provider}' nao registrado. "
-                f"Disponiveis: {list(_FACTORIES.keys())}"
+                f"Disponiveis: {list(LLM_REGISTRY.keys())}"
             )
         return factory.create(model, **self._kwargs)
 
